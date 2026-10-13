@@ -31,3 +31,9 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+#UserData
+user_data_dir
+
+#Config
+config/config.yaml

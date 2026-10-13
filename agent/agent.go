@@ -1,0 +1,293 @@
+package agent
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log"
+
+	"github.com/LouYuanbo1/ai-spider/spider"
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
+)
+
+type SpiderAgent struct {
+	Agent *adk.ChatModelAgent
+}
+
+func NewSpiderAgent(ctx context.Context, agent *adk.ChatModelAgent) (*SpiderAgent, error) {
+	if agent == nil {
+		return nil, fmt.Errorf("agent is nil")
+	}
+	return &SpiderAgent{Agent: agent}, nil
+}
+
+func NewDefaultSpiderAgent(ctx context.Context, model model.ToolCallingChatModel, spd *spider.Spider) (*SpiderAgent, error) {
+
+	tools, err := newSpiderTools(ctx, spd)
+	if err != nil {
+		return nil, err
+	}
+
+	instruction :=
+		`
+			## 角色定义
+			你是一位专业的网页数据抓取智能体，基于真实浏览器环境自动化操作网页，能够打开任意URL、模拟用户交互、执行JavaScript、提取页面内容。你擅长处理JS动态渲染页面，精准获取用户所需的网页数据。
+
+			## 核心能力
+			1. **页面导航**：打开指定URL并等待页面完全加载（包括JS动态内容渲染完成）
+			2. **可点击元素发现**：遍历页面可访问性树，采集当前页面上的链接与按钮及其 node_id，为精准点击提供依据
+			3. **多种方式交互**：支持通过 node_id（最精准）、CSS选择器、XPath 三种方式点击页面元素或向输入框键入文本，触发内容加载或页面跳转
+			4. **页面滚动**：支持指定像素级的页面滚动，用于触发懒加载内容或浏览长页面
+			5. **JS脚本执行**：在页面上下文中执行任意JavaScript代码，获取动态数据或操作DOM
+			6. **内容提取**：支持两种提取模式——智能正文提取（基于可读性算法自动去除广告/导航等噪音）或完整HTML获取
+
+			## 可用工具详解
+			| 工具名 | 用途 | 适用场景 |
+			|--------|------|----------|
+			| navigate_tool | 导航到目标URL并等待页面加载完成 | 用户提供URL需要查看/抓取页面内容时，作为第一步操作 |
+			| get_interactives_tool | 获取当前页面所有可交互元素（链接/按钮/文本输入框），均含 node_id | 需要点击元素或向输入框键入文本但不确定其选择器，或需要精准定位避免歧义时，先调用此工具 |
+			| click_by_node_id_tool | 通过 node_id 精准点击元素 | 已有 get_interactives_tool 返回的 node_id 时，为最推荐、最精准的点击方式；请优先使用 |
+			| click_by_css_tool | 通过CSS选择器点击元素 | 明确知道目标元素的CSS选择器（如 button.load-more）且无歧义时 |
+			| click_by_xpath_tool | 通过XPath点击元素 | 明确知道目标元素的XPath（如 //div[@data-id="42"]/button）且无歧义时 |
+			| input_by_node_id_tool | 通过 node_id 向输入框键入文本 | get_interactives_tool 的 inputs 列表中有目标输入框的 node_id 时，为最精准的输入方式；请优先使用 |
+			| input_by_css_tool | 通过CSS选择器向输入框键入文本 | 明确知道目标输入框的CSS选择器（如 input.search-input）且无歧义时 |
+			| input_by_xpath_tool | 通过XPath向输入框键入文本 | 明确知道目标输入框的XPath（如 //input[@placeholder="搜索"]）且无歧义时 |
+			| scroll_tool | 按指定像素数滚动页面 | 触发无限滚动加载、浏览长页面、等待懒加载内容出现时 |
+			| javascript_tool | 在页面中执行JavaScript并获取返回值 | 仅在无现成工具可完成的复杂自定义场景时使用（详见下方的JS使用准则） |
+			| html_tool | 获取当前页面的HTML或提取正文 | 已导航到目标页面后，需要提取内容时作为最终步骤使用 |
+
+			## 点击方式选择建议（重要）
+			- **优先使用 click_by_node_id_tool**：node_id 唯一且明确，可避免因页面中存在重复文本/相似选择器导致的误点，是最可靠的点击方式。
+			- 点击前不确定目标元素结构时，先调用 get_interactives_tool 获取页面可交互元素列表，从中选取目标元素对应的 node_id 进行点击。
+			- **注意**：node_id 在整页导航或大规模 DOM 重渲染后会失效，若点击失效请重新调用 get_interactives_tool 获取最新的 node_id。
+			- 在无歧义且对结构非常确定时，也可直接使用 click_by_css_tool 或 click_by_xpath_tool。
+
+			## 输入方式选择建议（重要）
+			- **优先使用 input_by_node_id_tool**：先调用 get_interactives_tool，其返回的 inputs 列表包含输入框的 node_id，据此精准定位输入，最可靠。
+			- 无法拿到 node_id 时，再按需用 input_by_css_tool 或 input_by_xpath_tool。
+			- **node_id 失效注意**：整页导航或大规模 DOM 重渲染后 node_id 会失效，请先重新调用 get_interactives_tool 刷新。
+			- 向已有内容的输入框输入前，可设 clear=true 先清空再键入。
+
+			## JS使用准则（重要，务必遵守）
+			- **能用 pages 上已有的专用工具（navigate/click/input/scroll/html）解决的问题，绝不使用 javascript_tool**，以减少出错几率。
+			- 向输入框键入文本一律用 input_by_*_tool，点击用 click_by_*_tool，滚动用 scroll_tool，提取内容用 html_tool。
+			- 仅当现有工具无法完成（如复杂数据处理、特定 DOM 操作、跨域拦截等）时才考虑 javascript_tool，并优先用 get_interactives/输入/点击工具组合替代。
+
+			## 操作工作流
+			典型的数据抓取流程：
+			1. **导航页面** → 使用 navigate_tool 导航到目标URL
+			2. **定位与交互** → 需要点击时优先用 get_interactives_tool 获取 node_id，再用 click_by_node_id_tool 精准点击；需要搜索/填写时，同样先用 get_interactives_tool 拿到输入框的 node_id，再用 input_by_node_id_tool 键入文本
+			3. **滚动** → 根据需要使用 scroll_tool 触发懒加载内容或浏览长页面
+			4. **内容提取** → 使用 html_tool 获取最终内容（默认智能提取正文，必要时获取完整HTML）
+
+			注意：
+			- 每次调用工具后会返回页面的最新内容/摘要，请据此判断是否需要继续操作
+			- html_tool 在不传 enable_full_info 时使用可读性算法智能提取正文，适合大多数场景；传 enable_full_info=true 时返回完整HTML
+			- 对于JS动态渲染页面，请确保 navigate_tool 完成加载后再进行后续操作
+			- 输入文本/点击后，如需搜索功能生效，通常还需点击搜索按钮或用 get_interactives 找到对应按钮再点击
+
+			## 行为准则
+			- 所有操作基于用户明确指令，不主动访问用户未指定的URL
+			- 优先使用智能正文提取模式（EnableFullInfo=false），减少无效信息返回
+			- 在点击或滚动后，如页面内容已满足需求，应及时调用 html_tool 提取内容
+			- 遇到页面加载失败或元素未找到时，如实报告错误并尝试替代方案
+			- 提取的正文内容保持原文结构，不添加个人解读
+			- 不访问或提取涉及违法、侵权内容的页面
+
+			## 输出格式规范
+			完成抓取任务后，请按以下格式组织结果：
+
+			【页面信息】URL、标题（如可获取）
+			【抓取内容】以清晰的段落结构呈现提取的正文内容，保留原标题层级
+			【操作摘要】简述执行了哪些工具调用及其结果
+			【注意事项】（如适用）页面部分内容未加载、需登录、反爬限制等
+
+			## 错误处理策略
+			- 页面加载超时 → 报告超时并建议用户确认URL是否正确
+			- 元素选择器未命中 → 尝试提供页面中实际存在的相似元素选择器建议
+			- JS执行异常 → 报告具体错误信息，检查JS语法或页面是否已加载目标元素
+			- 页面返回空内容 → 说明可能原因（反爬、需登录、纯Canvas渲染等），建议尝试 EnableFullInfo=true
+
+			## 交互示例
+			用户：「在示例网站的搜索框搜"Go爬虫"并抓取第一条结果」
+			助手操作流程：
+			1. 调用 navigate_tool(url="https://example.com")
+			2. 调用 get_interactives_tool 获取页面的 inputs（输入框）和可点击元素及其 node_id
+			3. 用 input_by_node_id_tool 向搜索框键入"Go爬虫"（node_id 取自 inputs 列表）
+			4. 用 click_by_node_id_tool 点击搜索按钮
+			5. 调用 html_tool(enable_full_info=false) 提取结果
+		`
+	searchAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "crawlerAgent",
+		Description: "一个基于大模型的网页数据抓取智能体，支持浏览器自动化操作与智能内容提取",
+		Instruction: instruction,
+		Model:       model,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: tools,
+			},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("Error creating search agent: %w", err)
+	}
+	return &SpiderAgent{Agent: searchAgent}, nil
+}
+
+// newSpiderTools 集中注册 Spider 智能体所需的所有浏览器自动化工具。
+// 这里用一张注册表描述“工具名 → 创建函数”，统一依次创建并聚合到工具列表，
+// 避免在 NewDefaultSpiderAgent 中堆叠十余段重复的错误处理代码。
+func newSpiderTools(ctx context.Context, spd *spider.Spider) ([]tool.BaseTool, error) {
+	constructors := []struct {
+		name string
+		new  func() (tool.InvokableTool, error)
+	}{
+		{name: "navigate_tool", new: func() (tool.InvokableTool, error) { return NewNavigateTool(ctx, spd) }},
+		{name: "get_interactives_tool", new: func() (tool.InvokableTool, error) { return NewGetInteractivesTool(ctx, spd) }},
+		{name: "click_by_css_tool", new: func() (tool.InvokableTool, error) { return NewClickByCSSTool(ctx, spd) }},
+		{name: "click_by_xpath_tool", new: func() (tool.InvokableTool, error) { return NewClickByXPathTool(ctx, spd) }},
+		{name: "click_by_node_id_tool", new: func() (tool.InvokableTool, error) { return NewClickByNodeIDTool(ctx, spd) }},
+		{name: "input_by_css_tool", new: func() (tool.InvokableTool, error) { return NewInputByCSSTool(ctx, spd) }},
+		{name: "input_by_xpath_tool", new: func() (tool.InvokableTool, error) { return NewInputByXPathTool(ctx, spd) }},
+		{name: "input_by_node_id_tool", new: func() (tool.InvokableTool, error) { return NewInputByNodeIDTool(ctx, spd) }},
+		{name: "scroll_tool", new: func() (tool.InvokableTool, error) { return NewScrollTool(ctx, spd) }},
+		{name: "javascript_tool", new: func() (tool.InvokableTool, error) { return NewJavaScriptTool(ctx, spd) }},
+		{name: "html_tool", new: func() (tool.InvokableTool, error) { return NewHTMLTool(ctx, spd) }},
+	}
+
+	tools := make([]tool.BaseTool, 0, len(constructors))
+	for _, c := range constructors {
+		t, err := c.new()
+		if err != nil {
+			return nil, fmt.Errorf("创建工具 %s 失败: %w", c.name, err)
+		}
+		tools = append(tools, t)
+	}
+	return tools, nil
+}
+
+func (c *SpiderAgent) Run(ctx context.Context, input *adk.AgentInput, options ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	return c.Agent.Run(ctx, input, options...)
+}
+
+func (c *SpiderAgent) OutputMessage(ctx context.Context, input string, streamFunc func(string), options ...adk.AgentRunOption) {
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: c.Agent, EnableStreaming: true})
+	iter := runner.Query(ctx, input, options...)
+	stream(iter, streamFunc)
+}
+
+func stream(iter *adk.AsyncIterator[*adk.AgentEvent], streamFunc func(string)) {
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+
+		if event.Err != nil {
+			log.Printf("Runner 错误: %v", event.Err)
+			break
+		}
+
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			mo := event.Output.MessageOutput
+
+			// 【关键修复 1】：检查 MessageStream 是否为 nil
+			if mo.MessageStream == nil {
+				continue // 跳过 nil stream
+			}
+
+			// 只有 Stream 不为 nil 时，才进入流式处理
+			streamMessage(mo.MessageStream, streamFunc)
+		}
+	}
+}
+
+func streamMessage(s adk.MessageStream, streamFunc func(string)) {
+	// 【关键修复 2】：防御性判空，防止外部意外传入 nil 导致 panic
+	if s == nil {
+		return
+	}
+	defer s.Close()
+
+	// 工具调用信息缓存：在流式模式下，工具调用参数会跨多个 chunk 到达，需要累积
+	accToolCalls := make(map[int]*schema.ToolCall)
+
+	for {
+		chunk, err := s.Recv()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Printf("Stream Recv 错误: %v", err)
+			break
+		}
+
+		// 处理思考过程 (如果开启了 DeepSeek-R1 等支持 Reasoning 的模型)
+		if chunk.ReasoningContent != "" {
+			flushToolCalls(accToolCalls, streamFunc)
+			streamFunc(chunk.ReasoningContent)
+			continue
+		}
+
+		// 处理工具调用：累积各 chunk 中的参数片段
+		if len(chunk.ToolCalls) > 0 {
+			accumulateToolCalls(accToolCalls, chunk.ToolCalls)
+			continue
+		}
+
+		// 处理文本内容：先刷新累积的工具调用，再输出文本
+		if chunk.Content != "" {
+			flushToolCalls(accToolCalls, streamFunc)
+			streamFunc(chunk.Content)
+		}
+	}
+
+	// 流结束时刷新残留的工具调用
+	flushToolCalls(accToolCalls, streamFunc)
+}
+
+// accumulateToolCalls 将流式 chunk 中的工具调用信息累积到 acc 中
+func accumulateToolCalls(acc map[int]*schema.ToolCall, toolCalls []schema.ToolCall) {
+	for _, tc := range toolCalls {
+		idx := 0
+		if tc.Index != nil {
+			idx = *tc.Index
+		}
+
+		if existing, ok := acc[idx]; ok {
+			if tc.ID != "" {
+				existing.ID = tc.ID
+			}
+			if tc.Type != "" {
+				existing.Type = tc.Type
+			}
+			if tc.Function.Name != "" {
+				existing.Function.Name = tc.Function.Name
+			}
+			existing.Function.Arguments += tc.Function.Arguments
+		} else {
+			cp := tc
+			acc[idx] = &cp
+		}
+	}
+}
+
+// flushToolCalls 输出所有累积的工具调用信息并清空缓存
+func flushToolCalls(acc map[int]*schema.ToolCall, streamFunc func(string)) {
+	for idx := 0; idx < len(acc); idx++ {
+		tc, ok := acc[idx]
+		if !ok {
+			continue
+		}
+		line := "\n[工具调用] " + tc.Function.Name
+		if len(tc.Function.Arguments) > 0 {
+			line += ", 参数: " + tc.Function.Arguments
+		}
+		streamFunc(line + "\n")
+		delete(acc, idx)
+	}
+}
