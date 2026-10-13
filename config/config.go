@@ -25,6 +25,8 @@ type RodConfig struct {
 	BasicRemoteDebuggingPort int `yaml:"basic_remote_debugging_port"`
 	//(开启CDP通信追踪)
 	Trace bool `yaml:"trace"`
+	//(真人化行为：逐字打字/点击悬停/分段滚动) 默认 true
+	Humanize bool `yaml:"humanize"`
 }
 
 type ModelConfig struct {

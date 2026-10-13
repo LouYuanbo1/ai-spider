@@ -1,16 +1,12 @@
 rod:
   user_data_dir: user_data_dir
-  user_mode: false
+  user_mode: true
   headless: false
-  disable_blink_features: AutomationControlled
   incognito: false
   disable_dev_shm_usage: true
   no_sandbox: true
-  default_page_width: 300
-  default_page_height: 400
-  user_agent: >-
-    Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0
-    Safari/537.36 Edg/142.0.0.0
+  default_page_width: 1920
+  default_page_height: 1080
   leakless: true
   bin: C:/Program Files/Google/Chrome/Application/chrome.exe
   disable_background_networking: false
@@ -19,5 +15,6 @@ rod:
   disable_renderer_backgrounding: true
   basic_remote_debugging_port: 9222
   trace: false
+  humanize: true
 model:
   api_key: your_api_key
