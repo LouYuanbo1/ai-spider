@@ -27,9 +27,11 @@ func debugTool[T any](name string, fn func(ctx context.Context, params *T) (stri
 			return fmt.Sprintf("【%s 执行失败】%v\n请分析失败原因，调整参数或换一种方式重新尝试。", name, err), nil
 		}
 		view := out
-		if len(view) > 500 {
-			view = view[:500] + "\n  ...(输出过长已截断)"
-		}
+		/*
+			if len(view) > 500 {
+				view = view[:500] + "\n  ...(输出过长已截断)"
+			}
+		*/
 		log.Printf("[工具调用] %s\n  参数: %s\n  返回: %s", name, argJSON, view)
 		return out, nil
 	}
@@ -119,11 +121,11 @@ func NewClickByNodeIDTool(ctx context.Context, spider *spider.Spider) (tool.Invo
 
 func InputByCSSFunc(ctx context.Context, spd *spider.Spider) func(ctx context.Context, params *spider.InputByCSS) (string, error) {
 	return func(ctx context.Context, params *spider.InputByCSS) (string, error) {
-		err := spd.DoInput(params.Selector, params.Text, params.Clear)
+		effective, err := spd.DoInput(params.Selector, params.Text, params.Clear)
 		if err != nil {
 			return "", err
 		}
-		return spd.ActionSummary("input_by_css", "ok", true)
+		return spd.ActionSummary("input_by_css", "ok", effective)
 	}
 }
 
@@ -136,11 +138,11 @@ func NewInputByCSSTool(ctx context.Context, spider *spider.Spider) (tool.Invokab
 
 func InputByXPathFunc(ctx context.Context, spd *spider.Spider) func(ctx context.Context, params *spider.InputByXPath) (string, error) {
 	return func(ctx context.Context, params *spider.InputByXPath) (string, error) {
-		err := spd.DoInputX(params.Selector, params.Text, params.Clear)
+		effective, err := spd.DoInputX(params.Selector, params.Text, params.Clear)
 		if err != nil {
 			return "", err
 		}
-		return spd.ActionSummary("input_by_xpath", "ok", true)
+		return spd.ActionSummary("input_by_xpath", "ok", effective)
 	}
 }
 
@@ -153,11 +155,11 @@ func NewInputByXPathTool(ctx context.Context, spider *spider.Spider) (tool.Invok
 
 func InputByNodeIDFunc(ctx context.Context, spd *spider.Spider) func(ctx context.Context, params *spider.InputByNodeID) (string, error) {
 	return func(ctx context.Context, params *spider.InputByNodeID) (string, error) {
-		err := spd.DoInputNode(proto.DOMBackendNodeID(params.NodeID), params.Text, params.Clear)
+		effective, err := spd.DoInputNode(proto.DOMBackendNodeID(params.NodeID), params.Text, params.Clear)
 		if err != nil {
 			return "", err
 		}
-		return spd.ActionSummary("input_by_node_id", "ok", true)
+		return spd.ActionSummary("input_by_node_id", "ok", effective)
 	}
 }
 
@@ -213,23 +215,26 @@ func NewJavaScriptTool(ctx context.Context, spider *spider.Spider) (tool.Invokab
 	return jsTool, nil
 }
 
-type HTMLParams struct {
-	EnableFullInfo bool `json:"enable_full_info" jsonschema:"description=是否返回完整信息，false=只提取关键信息"` // true=返回完整信息，false=只提取关键信息
-}
-
-func HTMLFunc(ctx context.Context, spider *spider.Spider) func(ctx context.Context, params *HTMLParams) (string, error) {
-	return func(ctx context.Context, params *HTMLParams) (string, error) {
-		if params.EnableFullInfo {
-			return spider.GetHTML()
+func HTMLFunc(ctx context.Context, spd *spider.Spider) func(ctx context.Context, params *spider.HTML) (string, error) {
+	return func(ctx context.Context, params *spider.HTML) (string, error) {
+		mode := spider.DefaultHTMLMode(params.Mode)
+		switch mode {
+		case spider.HTMLModeStructured:
+			return spd.GetStructured()
+		case spider.HTMLModeFull:
+			return spd.GetHTML()
+		case spider.HTMLModeAccessibility:
+			return spd.GetAXContent()
+		default:
+			return "", fmt.Errorf("未知的 mode=%q，可选：structured|accessibility|full", mode)
 		}
-		return spider.GetArticle()
 	}
 }
 
 func NewHTMLTool(ctx context.Context, spider *spider.Spider) (tool.InvokableTool, error) {
 	htmlTool, err := utils.InferTool(
 		"html_tool", // tool name
-		`Web browser are used to get the HTML content of this page`, // tool description
+		`Get the content of the current page in one of three modes: accessibility (default, preferred), structured, full. accessibility builds compact Markdown from the browser Accessibility/AX tree, which naturally excludes hidden/decorative/script nodes, restores headings/lists/tables and parent-child nesting, and attaches a node_id marker to every interactive element (links/buttons/inputs) so you can directly click or type at them without re-fetching the interactives list -- this is the most token-efficient and interactive-friendly choice, use by default; structured converts the pruned DOM to readable Markdown (headings/lists/tables/links with absolute URLs) and preserves rich inline formatting like bold/inline code, use when content is content-rich reading material; full returns the complete raw HTML with precise DOM structure and CSS attributes (expensive, only when you need the original source, code snippets, data tables, or CSS-attribute/xpath-based selectors).`, // tool description
 		debugTool("html_tool", HTMLFunc(ctx, spider)))
 	if err != nil {
 		return nil, err
