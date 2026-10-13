@@ -7,7 +7,7 @@
 ## 特性
 
 - 🧠 **LLM 智能体驱动**：基于 eino ADK 构建，模型自主决策要调用哪个浏览器工具、如何完成目标。
-- 🌐 **真实浏览器环境**：基于 go-rod 启动 Chrome，配合 stealth 反检测，`DisableBlinkFeatures=AutomationControlled` 隐藏自动化痕迹。
+- 🌐 **真实浏览器环境**：基于 go-rod 启动 Chrome，配合 stealth 在运行时隐藏 `navigator.webdriver` 等自动化痕迹。
 - 🛠️ **11 个精细化工具**：导航、可交互元素发现、CSS/XPath/node_id 三种点击与输入、滚动、JS 执行、智能正文提取。
 - 🎯 **node_id 精准定位**：通过 `get_interactives_tool` 返回的后端 DOM 节点 ID 精准点击/输入，规避同名元素与相似选择器歧义。
 - 📄 **智能正文提取**：基于可读性算法（go-readability）自动剥离广告/导航噪音，也可选择返回完整 HTML。
@@ -32,6 +32,7 @@ ai-spider/
 │   └── tools.go            # 每个浏览器工具的封装（含调试日志包装 debugTool）
 ├── spider/
 │   ├── spider.go           # 浏览器封装：导航、点击、输入、滚动、JS、正文提取
+│   ├── humanize.go         # "真人化"行为层：逐字打字、点击悬停、分段滚动（由 rod.humanize 控制）
 │   ├── action.go           # 密封接口 Action 与各动作参数结构体
 │   ├── option.go           # Launcher 选项函数（链式配置 Chrome 启动参数）
 │   ├── spider_test.go      # 正文截断与 Action 序列化等单元测试
@@ -67,6 +68,7 @@ ai-spider/
 封装 go-rod 对 Chrome 的全部底层操作，向上层 agent 提供稳定的动作原语。核心类型为 `Spider`，持有 `browser` / `page` / `logger`：
 
 - [spider.go](spider/spider.go)：导航（`Navigate`）、三种点击（`DoClick` / `DoClickX` / `DoClickNode`）、三种输入（`DoInput` / `DoInputX` / `DoInputNode`）、滚动（`DoScroll`）、JS 执行（`DoJavaScript`）、智能正文提取（`GetArticle`）/ 完整 HTML（`GetHTML`），以及 `ActionSummary` 轻量动作回执与 `PageFingerprint` 页面变化判断。JS 执行自带一次重试，应对 SPA 偶发失败。
+- [humanize.go](spider/humanize.go)：`"真人化"`行为辅助层。开启时（`rod.humanize: true`）将输入改为逐字打字（字符间随机停顿并偶发打错退格）、点击前置悬停并随机停留、滚动改为分段式并穿插随机"阅读"停顿，降低被识别为机器人的概率；关闭时回退为一次性输入、瞬时点击与瞬时滚动。开关保存在 `Spider.humanize` 字段，由 `InitSpider` 从配置注入，每个实例相互独立。
 - [action.go](spider/action.go)：通过 `isAction()` 私有方法实现 Go 的**密封接口**技巧，定义 `Navigate` / `ClickBy*` / `InputBy*` / `Scroll` / `JavaScript` / `HTML` 等动作参数结构体。
 - [option.go](spider/option.go)：`LauncherOption` 函数式选项，将配置映射为 Chrome 启动旗标（如 `WithUserDataDir`、`WithHeadless`、`WithRemoteDebuggingPort`），供 `InitSpider` 链式拼接。
 
@@ -147,15 +149,15 @@ go run .
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `user_data_dir` | `user_data_dir` | 浏览器用户数据目录（其下的 instance_0 为实际实例目录） |
-| `user_mode` | `false` | 是否使用本机用户模式浏览器 |
+| `user_data_dir` | `user_data_dir` | 浏览器用户数据目录（`user_mode:false` 时作为干净隔离档案目录使用） |
+| `user_mode` | `true` | 复用本机真实浏览器档案（登录态/Cookies）|
 | `headless` | `false` | 是否无头模式运行 |
-| `disable_blink_features` | `AutomationControlled` | 禁用的 Blink 特性，用于反自动化检测 |
+| `disable_blink_features` | 缺省即留空 | 缺省（不写）时不向 Chrome 传该 flag，隐藏 webdriver 交由 stealth 运行时处理 |
 | `incognito` | `false` | 是否无痕模式 |
 | `disable_dev_shm_usage` | `true` | 禁用共享内存（适用于受限容器） |
 | `no_sandbox` | `true` | 禁用沙箱 |
-| `default_page_width` / `default_page_height` | `300` / `400` | 页面尺寸（当前未直接使用，可扩展） |
-| `user_agent` | Edge UA | 自定义 User-Agent |
+| `default_page_width` / `default_page_height` | `1920` / `1080` | 窗口尺寸（经 `WithWindowSize` 实际生效） |
+| `user_agent` | 缺省即留空 | 缺省（不写）时使用浏览器自报的真实 UA，最小化指纹差异 |
 | `leakless` | `true` | 启用 go-rod leakless 进程保护 |
 | `bin` | Chrome 默认路径 | Chrome 可执行文件路径 |
 | `disable_background_networking` | `false` | 禁用后台网络 |
@@ -164,6 +166,7 @@ go run .
 | `disable_renderer_backgrounding` | `true` | 禁用渲染器后台化 |
 | `basic_remote_debugging_port` | `9222` | 远程调试端口 |
 | `trace` | `false` | 是否开启 CDP 通信追踪 |
+| `humanize` | `true` | 是否启用"真人化"行为（逐字打字+偶发打错、点击悬停停顿、分段滚动+阅读停顿），用于降低被识别为机器人的概率 |
 
 ### model（模型配置）
 

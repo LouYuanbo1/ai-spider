@@ -18,22 +18,26 @@ import (
 )
 
 type Spider struct {
-	browser *rod.Browser
-	page    *rod.Page
-	logger  *slog.Logger
+	browser  *rod.Browser
+	page     *rod.Page
+	logger   *slog.Logger
+	humanize bool
 }
 
 func InitSpider(cfg *config.RodConfig) (*Spider, error) {
 	logger := slog.Default().With("component", "spider")
 
-	dataDir := fmt.Sprintf("%s/instance_0", cfg.UserDataDir)
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return nil, fmt.Errorf("创建实例数据目录失败: %v", err)
+	// Chrome 136+ 要求远程调试必须搭配非默认的 --user-data-dir，
+	// 无论是否 user 模式都必须显式设置，否则启动会被拒绝。
+	// 路径不得为""
+	if cfg.UserDataDir != "" {
+		if err := os.MkdirAll(cfg.UserDataDir, 0755); err != nil {
+			return nil, fmt.Errorf("创建实例数据目录失败: %v", err)
+		}
 	}
 
-	launcher := CreateLauncher(cfg.UserMode,
+	launcherOptions := []LauncherOption{
 		WithBin(cfg.Bin),
-		WithUserDataDir(dataDir),
 		WithHeadless(cfg.Headless),
 		WithDisableBlinkFeatures(cfg.DisableBlinkFeatures),
 		WithIncognito(cfg.Incognito),
@@ -44,7 +48,11 @@ func InitSpider(cfg *config.RodConfig) (*Spider, error) {
 		WithDisableBackgroundNetworking(cfg.DisableBackgroundNetworking),
 		WithDisableBackgroundTimerThrottling(cfg.DisableBackgroundTimerThrottling),
 		WithRemoteDebuggingPort(cfg.BasicRemoteDebuggingPort),
-	)
+		WithWindowSize(cfg.DefaultPageWidth, cfg.DefaultPageHeight),
+		WithUserDataDir(cfg.UserDataDir),
+	}
+
+	launcher := CreateLauncher(cfg.UserMode, launcherOptions...)
 	url, err := launcher.Launch()
 	if err != nil {
 		return nil, fmt.Errorf("启动浏览器失败: %v", err)
@@ -59,9 +67,10 @@ func InitSpider(cfg *config.RodConfig) (*Spider, error) {
 	page := stealth.MustPage(browser)
 
 	return &Spider{
-		browser: browser,
-		page:    page,
-		logger:  logger,
+		browser:  browser,
+		page:     page,
+		logger:   logger,
+		humanize: cfg.Humanize,
 	}, nil
 }
 
@@ -96,17 +105,22 @@ func (s *Spider) Navigate(url string) error {
 	return nil
 }
 
+// clickElement 对目标元素执行真人化点击，并在点击后等待网络空闲。
+func (s *Spider) clickElement(el *rod.Element) error {
+	if err := s.clickLikeHuman(el); err != nil {
+		return err
+	}
+	s.page.WaitRequestIdle(500*time.Millisecond, nil, nil, nil)
+	return nil
+}
+
 // DoClick CSS选择器点击，点击后等待网络空闲
 func (s *Spider) DoClick(selector string) error {
 	el, err := s.page.Element(selector)
 	if err != nil {
 		return fmt.Errorf("未找到元素 %q: %v", selector, err)
 	}
-	if err := el.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return err
-	}
-	s.page.WaitRequestIdle(500*time.Millisecond, nil, nil, nil)
-	return nil
+	return s.clickElement(el)
 }
 
 // DoClickX XPath点击，点击后等待网络空闲
@@ -115,11 +129,7 @@ func (s *Spider) DoClickX(selector string) error {
 	if err != nil {
 		return fmt.Errorf("未找到XPath元素 %q: %v", selector, err)
 	}
-	if err := el.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return err
-	}
-	s.page.WaitRequestIdle(500*time.Millisecond, nil, nil, nil)
-	return nil
+	return s.clickElement(el)
 }
 
 // DoClickNode 通过后端 DOM 节点 ID 精准点击，避免同名元素/选择器歧义
@@ -128,23 +138,22 @@ func (s *Spider) DoClickNode(backendNodeID proto.DOMBackendNodeID) error {
 	if err != nil {
 		return fmt.Errorf("解析节点 %d 失败: %v", backendNodeID, err)
 	}
-	if err := el.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return err
-	}
-	s.page.WaitRequestIdle(500*time.Millisecond, nil, nil, nil)
-	return nil
+	return s.clickElement(el)
 }
 
 // typeText 将文本输入到元素；clearFlag 为 true 时先清空原有内容。
-// 使用 rod 原生 SelectAllText + Input 触发真实键盘事件，对 React/Vue 受控组件友好。
-func typeText(el *rod.Element, text string, clearFlag bool) error {
-	if clearFlag {
-		// 全选原有内容，随后 Input(text) 会直接覆盖选中文本
-		if err := el.SelectAllText(); err != nil {
-			return err
+// 使用 rod 原生键盘事件触发真实输入，对 React/Vue 受控组件友好。
+// 开启 humanize 时走逐字打字（见 humanize.go），否则一次性写入。
+func (s *Spider) typeText(el *rod.Element, text string, clearFlag bool) error {
+	if !s.humanize {
+		if clearFlag {
+			if err := el.SelectAllText(); err != nil {
+				return err
+			}
 		}
+		return el.Input(text)
 	}
-	return el.Input(text)
+	return s.typeLikeHuman(el, text, clearFlag)
 }
 
 // DoInput CSS选择器定位输入框输入文本
@@ -153,7 +162,7 @@ func (s *Spider) DoInput(selector, text string, clearFlag bool) error {
 	if err != nil {
 		return fmt.Errorf("未找到输入框 %q: %v", selector, err)
 	}
-	return typeText(el, text, clearFlag)
+	return s.typeText(el, text, clearFlag)
 }
 
 // DoInputX XPath定位输入框输入文本
@@ -162,7 +171,7 @@ func (s *Spider) DoInputX(selector, text string, clearFlag bool) error {
 	if err != nil {
 		return fmt.Errorf("未找到XPath输入框 %q: %v", selector, err)
 	}
-	return typeText(el, text, clearFlag)
+	return s.typeText(el, text, clearFlag)
 }
 
 // DoInputNode 通过后端 DOM 节点 ID 精准定位输入框并输入文本
@@ -171,13 +180,13 @@ func (s *Spider) DoInputNode(backendNodeID proto.DOMBackendNodeID, text string, 
 	if err != nil {
 		return fmt.Errorf("解析节点 %d 失败: %v", backendNodeID, err)
 	}
-	return typeText(el, text, clearFlag)
+	return s.typeText(el, text, clearFlag)
 }
 
-// DoScroll 页面滚动（瞬时完成），滚动后等待网络空闲以捕获懒加载内容
+// DoScroll 页面滚动，滚动后等待网络空闲以捕获懒加载内容。
+// 开启 humanize 时分段滚动并在每段间随机"阅读"停留（见 humanize.go）。
 func (s *Spider) DoScroll(scrollY int) error {
-	_, err := s.page.Eval(`(dy) => window.scrollBy({top: dy, behavior: 'smooth'})`, scrollY)
-	if err != nil {
+	if err := s.scrollLikeHuman(s.page, scrollY); err != nil {
 		return err
 	}
 	s.page.WaitRequestIdle(500*time.Millisecond, nil, nil, nil)
