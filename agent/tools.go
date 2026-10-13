@@ -27,11 +27,9 @@ func debugTool[T any](name string, fn func(ctx context.Context, params *T) (stri
 			return fmt.Sprintf("【%s 执行失败】%v\n请分析失败原因，调整参数或换一种方式重新尝试。", name, err), nil
 		}
 		view := out
-		/*
-			if len(view) > 500 {
-				view = view[:500] + "\n  ...(输出过长已截断)"
-			}
-		*/
+		if len(view) > 500 {
+			view = view[:500] + "\n  ...(输出过长已截断)"
+		}
 		log.Printf("[工具调用] %s\n  参数: %s\n  返回: %s", name, argJSON, view)
 		return out, nil
 	}
