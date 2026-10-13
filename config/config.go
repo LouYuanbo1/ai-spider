@@ -13,9 +13,9 @@ type RodConfig struct {
 	UserAgent            string `yaml:"user_agent"`
 	Leakless             bool   `yaml:"leakless"`
 	Bin                  string `yaml:"bin"`
-	//(禁用后台标签页定时器节流)
+	//禁用后台网络(后台标签页挂起的请求不下载资源)
 	DisableBackgroundNetworking bool `yaml:"disable_background_networking"`
-	//(禁用后台网络) 设为false
+	//禁用后台定时器节流(后台标签页的 setTimeout/setInterval 不被降频)
 	DisableBackgroundTimerThrottling bool `yaml:"disable_background_timer_throttling"`
 	//(禁用后台窗口遮挡)
 	DisableBackgroundingOccludedWindows bool `yaml:"disable_backgrounding_occluded_windows"`

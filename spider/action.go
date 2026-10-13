@@ -75,8 +75,28 @@ type JavaScript struct {
 func (j *JavaScript) isAction() {
 }
 
+// HTMLMode 定义 html_tool 的取数模式。
+type HTMLMode string
+
+const (
+	HTMLModeAccessibility HTMLMode = "accessibility" // 默认，首选。基于浏览器可访问性树(AX)输出紧凑Markdown：天然剔除隐藏/装饰/脚本节点，还原标题/列表/表格与父子宫级，且每条可交互元素附 node_id 可直接点击/输入，最省 token 且图文并貌兼备
+	HTMLModeStructured    HTMLMode = "structured"    // 把已剪枝页面转为可读 Markdown（含标题/列表/表格/链接），保留富文本内联格式（粗体/代码等），适合内容丰富的阅读场景
+	HTMLModeFull          HTMLMode = "full"          // 完整原始HTML（体积大，token 昂贵，当需要精确 DOM 结构/CSS 属性/选择器定位或原始源码时使用）
+)
+
 type HTML struct {
-	EnableFullInfo bool `json:"enable_full_info" jsonschema:"description=是否返回完整信息，false=只提取关键信息"` // true=返回完整信息，false=只提取关键信息
+	Mode HTMLMode `json:"mode,omitempty" jsonschema:"description=取数模式,enum=accessibility,enum=structured,enum=full,default=accessibility" jsonschema_description:"取数模式。默认accessibility(首选)：基于浏览器可访问性树AX输出紧凑Markdown，天然剔除隐藏装饰及脚本节点并还原标题列表表格与层级，每条可交互元素附node_id可点击或输入，最省token且图文兼备。structured=已剪枝页面转为可读Markdown，保留粗体行内代码等富文本内联格式，适合内容丰富的阅读。full=完整原始HTML，保留精确DOM结构与CSS属性，仅在需要原始源码代码数据表格或精确选择器定位时使用，token昂贵"` // accessibility(默认)|structured|full
+}
+
+func (h *HTML) isAction() {
+}
+
+// DefaultHTMLMode 返回实际生效的取数模式：未指定（空串）时回退到默认档 accessibility。
+func DefaultHTMLMode(mode HTMLMode) HTMLMode {
+	if mode == "" {
+		return HTMLModeAccessibility
+	}
+	return mode
 }
 
 type GetInteractive struct {

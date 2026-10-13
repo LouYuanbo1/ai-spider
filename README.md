@@ -8,9 +8,9 @@
 
 - 🧠 **LLM 智能体驱动**：基于 eino ADK 构建，模型自主决策要调用哪个浏览器工具、如何完成目标。
 - 🌐 **真实浏览器环境**：基于 go-rod 启动 Chrome，配合 stealth 在运行时隐藏 `navigator.webdriver` 等自动化痕迹。
-- 🛠️ **11 个精细化工具**：导航、可交互元素发现、CSS/XPath/node_id 三种点击与输入、滚动、JS 执行、智能正文提取。
+- 🛠️ **11 个精细化工具**：导航、可交互元素发现、CSS/XPath/node_id 三种点击与输入、滚动、JS 执行、结构化内容提取。
 - 🎯 **node_id 精准定位**：通过 `get_interactives_tool` 返回的后端 DOM 节点 ID 精准点击/输入，规避同名元素与相似选择器歧义。
-- 📄 **智能正文提取**：基于可读性算法（go-readability）自动剥离广告/导航噪音，也可选择返回完整 HTML。
+- 📄 **结构化取数**：`html_tool` 三种模式——默认 `accessibility` 基于可访问性树输出紧凑 Markdown（天然剔除隐藏/装饰/脚本节点、还原标题/列表/表格并附可交互 node_id，最省 token 且对 LLM 友好），`structured` 保留富文本内联格式，`full` 返回完整原始 HTML（保留精确结构与属性——需要 CSS/XPath 定位时使用）。
 - 💬 **终端多轮对话**：交互式命令行输入指令，逐轮调用智能体并流式输出思考与结果。
 - 🔍 **流式补齐与容错**：完整处理流式工具调用参数累积；工具失败不再中断，而是回传模型让其反思重试。
 
@@ -29,13 +29,23 @@ ai-spider/
 │   └── load.go             # 读取并解析 YAML 配置
 ├── agent/
 │   ├── agent.go            # 智能体构建：角色指令、11 个工具的注册表与流式输出处理
-│   └── tools.go            # 每个浏览器工具的封装（含调试日志包装 debugTool）
+│   ├── tools.go            # 每个浏览器工具的封装（含调试日志包装 debugTool）
+│   └── agent_test.go       # 智能体/工具缺省等单元测试
 ├── spider/
-│   ├── spider.go           # 浏览器封装：导航、点击、输入、滚动、JS、正文提取
+│   ├── spider.go           # 结构体定义 + InitSpider（启动/连接 Chrome） + Close + Navigate
+│   ├── click.go            # 三种点击：DoClick / DoClickX / DoClickNode + clickElement
+│   ├── input.go            # 三种输入 + 生效校验：DoInput×3 / typeText / elementValue
+│   ├── scroll.go           # DoScroll 页面滚动
+│   ├── javascript.go       # DoJavaScript 执行JS（含一次自动重试）
+│   ├── interact.go         # GetInteractives 采集可交互元素 + Link/Button/Input 结构体
+│   ├── extract.go          # 内容提取：GetHTML / GetStructured / AX 内容 GetAXContent
+│   ├── summary.go          # 动作回执 ActionSummary + PageFingerprint + truncateText
 │   ├── humanize.go         # "真人化"行为层：逐字打字、点击悬停、分段滚动（由 rod.humanize 控制）
 │   ├── action.go           # 密封接口 Action 与各动作参数结构体
 │   ├── option.go           # Launcher 选项函数（链式配置 Chrome 启动参数）
-│   ├── spider_test.go      # 正文截断与 Action 序列化等单元测试
+│   ├── extract_test.go     # 内容剪枝（prune/isLinkWall/isHiddenElement）与 AX 树渲染还原等单元测试
+│   ├── spider_test.go      # 正文截断、Action 序列化、Interactives/Summary JSON 等单元测试
+│   ├── spider_integration_test.go # 真实浏览器端到端集成测试（导航/取数/输入/滚动/JS 等）
 │   └── option_test.go      # Launcher 选项函数单元测试
 └── user_data_dir/          # 浏览器用户数据（Cookies/登录态等，已被 .gitignore 忽略）
 ```
@@ -67,7 +77,14 @@ ai-spider/
 
 封装 go-rod 对 Chrome 的全部底层操作，向上层 agent 提供稳定的动作原语。核心类型为 `Spider`，持有 `browser` / `page` / `logger`：
 
-- [spider.go](spider/spider.go)：导航（`Navigate`）、三种点击（`DoClick` / `DoClickX` / `DoClickNode`）、三种输入（`DoInput` / `DoInputX` / `DoInputNode`）、滚动（`DoScroll`）、JS 执行（`DoJavaScript`）、智能正文提取（`GetArticle`）/ 完整 HTML（`GetHTML`），以及 `ActionSummary` 轻量动作回执与 `PageFingerprint` 页面变化判断。JS 执行自带一次重试，应对 SPA 偶发失败。
+- [spider.go](spider/spider.go)：定义 `Spider` 结构体与生命周期——`InitSpider` 组装 Chrome 启动参数并连接浏览器、`Close` / `ClosePage` 释放资源、`Navigate` 导航并等待页面加载与网络空闲。是浏览器封装层的入口骨架。
+- [click.go](spider/click.go)：三种点击原语 `DoClick` / `DoClickX` / `DoClickNode`（CSS / XPath / node_id），统一走 `clickElement` 完成真人化点击并等待网络空闲。
+- [input.go](spider/input.go)：三种输入原语 `DoInput` / `DoInputX` / `DoInputNode`，经 `typeText` 执行输入，并通过 `elementValue` / `inputEffective` 读回控件值校验输入**是否真正生效**，返回 `(bool, error)`。
+- [scroll.go](spider/scroll.go)：`DoScroll` 页面滚动，滚后等待网络空闲以捕获懒加载内容。
+- [javascript.go](spider/javascript.go)：`DoJavaScript` 执行 JS 并取回返回值，自带一次重试以应对 SPA 页面偶发失败。
+- [interact.go](spider/interact.go)：`GetInteractives` 通过可访问性树采集链接/按钮/输入框（含 `node_id`），并定义 `Link` / `Button` / `Input` / `Interactives` 结构体。
+- [extract.go](spider/extract.go)：内容提取——`GetHTML` 返回完整原始 HTML；`GetStructured` 对整页做内容级剪枝（`prune`）后用 html-to-markdown(v2) 转为可读 Markdown；`GetAXContent` 基于浏览器可访问性树(AX)输出紧凑 Markdown（还原标题/列表/表格与层级，并内联可交互 `node_id`）。
+- [summary.go](spider/summary.go)：轻量动作回执 `ActionSummary`（`effective` 表示操作是否真正生效）与 `PageFingerprint` 页面变化判断、`truncateText` 截断工具。
 - [humanize.go](spider/humanize.go)：`"真人化"`行为辅助层。开启时（`rod.humanize: true`）将输入改为逐字打字（字符间随机停顿并偶发打错退格）、点击前置悬停并随机停留、滚动改为分段式并穿插随机"阅读"停顿，降低被识别为机器人的概率；关闭时回退为一次性输入、瞬时点击与瞬时滚动。开关保存在 `Spider.humanize` 字段，由 `InitSpider` 从配置注入，每个实例相互独立。
 - [action.go](spider/action.go)：通过 `isAction()` 私有方法实现 Go 的**密封接口**技巧，定义 `Navigate` / `ClickBy*` / `InputBy*` / `Scroll` / `JavaScript` / `HTML` 等动作参数结构体。
 - [option.go](spider/option.go)：`LauncherOption` 函数式选项，将配置映射为 Chrome 启动旗标（如 `WithUserDataDir`、`WithHeadless`、`WithRemoteDebuggingPort`），供 `InitSpider` 链式拼接。
@@ -192,12 +209,23 @@ go run .
 | `input_by_xpath_tool` | 通过 XPath 键入文本 | 明确 XPath 且无歧义 |
 | `scroll_tool` | 按像素滚动页面 | 触发懒加载/浏览长页 |
 | `javascript_tool` | 在页面执行 JS 并取回返回值 | 仅在专用工具无法完成时使用 |
-| `html_tool` | 获取完整 HTML 或智能提取正文 | 抓取的最终步骤 |
+| `html_tool` | 以 `mode` 三种模式取页面内容（默认 `accessibility`） | 抓取的最终步骤 |
 
 **关键设计**：
 - `node_id` 在整页导航或大规模 DOM 重渲染后会失效，此时需重新调用 `get_interactives_tool` 刷新。
-- 点击/输入优先用 `node_id`，其次 CSS/XPath；`html_tool` 默认用可读性算法提取正文，传 `enable_full_info=true` 返回完整 HTML。
+- 点击/输入优先用 `node_id`，其次 CSS/XPath；`html_tool` 默认 `mode=accessibility`（基于可访问性树输出紧凑 Markdown，天然剔除隐藏/装饰/脚本节点并还原标题/列表/表格、附可交互 node_id，最省 token），`mode=structured` 保留富文本内联格式（粗体/行内代码），`mode=full` 返回完整原始 HTML（保留精确 DOM 结构与 CSS 属性）。
 - 向已有内容的输入框键入前可设 `clear=true` 先清空。
+
+`html_tool` 的 `mode=accessibility` 输出中，可交互节点采用统一的前缀标记并附 `(node:N)`，便于模型识别动作与直接交互：
+
+| 标记 | 语义 | 示例 | 可用的交互工具 |
+|------|------|------|----------------|
+| `[BUTTON]` | 可点击的按钮 | `[BUTTON] Follow (node:80)` | `click_by_node_id_tool` |
+| `[INPUT]` | 可输入的文本框 | `[INPUT] Search (node:90)` | `input_by_node_id_tool` |
+| 普通链接 | 带 href 的链接（自带可点击语义，不加前缀） | `[Follow](/login) (node:7)` | `click_by_node_id_tool` 或直接按 href 导航 |
+| `![image: …]` | 图片（仅内容，不标记） | `![image: @user]` | — |
+
+> 约定要点：仅**有确定交互动作**的控件才打标记——`button`→`[BUTTON]`（点击）、输入框→`[INPUT]`（输入）；`link` 因 `[文本](href)` 已自表达可点击，不再叠加前缀，但仍保留 `(node:)` 供按节点点击；`image` 属纯内容，不标记。标题 `#…`、列表 `- …`、表格按 Markdown 还原。
 
 ## 测试
 
@@ -208,7 +236,13 @@ go test ./...
 当前覆盖内容：
 - `TestTruncateText`：正文截断的边界与中文（rune）处理。
 - `TestActionInterface` / `TestActionJSONRoundTrip` / `TestActionZeroValue`：`Action` 密封接口与各类动作参数的 JSON 编解码保真。
+- `TestInteractivesJSON` / `TestActionSummaryJSON`：可交互元素与动作回执的 JSON 编码。
+- `Test*`（extract_test）：内容级剪枝（`prune` / `isLinkWall` / `isHiddenElement` / `isSkippable`）与 AX 树渲染（表格还原、`heading` 层级、结构/去重/噪音过滤）等用例。
+- `TestHTMLModeDefault`：`html_tool` 缺省 mode 的取值行为。
 - `Test*`（option_test）：各 `With*` Launcher 选项函数的旗标设置行为。
+- `TestSpiderCoreIntegration`（spider_integration_test）：真实浏览器端到端集成测试，覆盖导航、取数、点击/输入、滚动、JS 执行等核心方法。
+
+> 注：`TestSpiderCoreIntegration` 需要本机可用的 Chrome 才能运行；`go test ./...` 在执行时若没有浏览器会跳过该用例。
 
 ## 安全说明
 
