@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 
+	"github.com/LouYuanbo1/ai-spider/agent/mnemo/fs"
+	"github.com/LouYuanbo1/ai-spider/agent/tools"
 	"github.com/LouYuanbo1/ai-spider/spider"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -16,6 +18,14 @@ import (
 
 type SpiderAgent struct {
 	Agent *adk.ChatModelAgent
+
+	// memory 持久化会话上下文；为 nil 时不保存记忆，退化为一次性执行。
+	memory *fs.Store[*schema.Message]
+}
+
+// SetMemoryStore 开启持久化记忆并指定会话存储目录。
+func (c *SpiderAgent) SetMemoryStore(store *fs.Store[*schema.Message]) {
+	c.memory = store
 }
 
 func NewSpiderAgent(ctx context.Context, agent *adk.ChatModelAgent) (*SpiderAgent, error) {
@@ -146,17 +156,17 @@ func newSpiderTools(ctx context.Context, spd *spider.Spider) ([]tool.BaseTool, e
 		name string
 		new  func() (tool.InvokableTool, error)
 	}{
-		{name: "navigate_tool", new: func() (tool.InvokableTool, error) { return NewNavigateTool(ctx, spd) }},
-		{name: "get_interactives_tool", new: func() (tool.InvokableTool, error) { return NewGetInteractivesTool(ctx, spd) }},
-		{name: "click_by_css_tool", new: func() (tool.InvokableTool, error) { return NewClickByCSSTool(ctx, spd) }},
-		{name: "click_by_xpath_tool", new: func() (tool.InvokableTool, error) { return NewClickByXPathTool(ctx, spd) }},
-		{name: "click_by_node_id_tool", new: func() (tool.InvokableTool, error) { return NewClickByNodeIDTool(ctx, spd) }},
-		{name: "input_by_css_tool", new: func() (tool.InvokableTool, error) { return NewInputByCSSTool(ctx, spd) }},
-		{name: "input_by_xpath_tool", new: func() (tool.InvokableTool, error) { return NewInputByXPathTool(ctx, spd) }},
-		{name: "input_by_node_id_tool", new: func() (tool.InvokableTool, error) { return NewInputByNodeIDTool(ctx, spd) }},
-		{name: "scroll_tool", new: func() (tool.InvokableTool, error) { return NewScrollTool(ctx, spd) }},
-		{name: "javascript_tool", new: func() (tool.InvokableTool, error) { return NewJavaScriptTool(ctx, spd) }},
-		{name: "html_tool", new: func() (tool.InvokableTool, error) { return NewHTMLTool(ctx, spd) }},
+		{name: "navigate_tool", new: func() (tool.InvokableTool, error) { return tools.NewNavigateTool(ctx, spd) }},
+		{name: "get_interactives_tool", new: func() (tool.InvokableTool, error) { return tools.NewGetInteractivesTool(ctx, spd) }},
+		{name: "click_by_css_tool", new: func() (tool.InvokableTool, error) { return tools.NewClickByCSSTool(ctx, spd) }},
+		{name: "click_by_xpath_tool", new: func() (tool.InvokableTool, error) { return tools.NewClickByXPathTool(ctx, spd) }},
+		{name: "click_by_node_id_tool", new: func() (tool.InvokableTool, error) { return tools.NewClickByNodeIDTool(ctx, spd) }},
+		{name: "input_by_css_tool", new: func() (tool.InvokableTool, error) { return tools.NewInputByCSSTool(ctx, spd) }},
+		{name: "input_by_xpath_tool", new: func() (tool.InvokableTool, error) { return tools.NewInputByXPathTool(ctx, spd) }},
+		{name: "input_by_node_id_tool", new: func() (tool.InvokableTool, error) { return tools.NewInputByNodeIDTool(ctx, spd) }},
+		{name: "scroll_tool", new: func() (tool.InvokableTool, error) { return tools.NewScrollTool(ctx, spd) }},
+		{name: "javascript_tool", new: func() (tool.InvokableTool, error) { return tools.NewJavaScriptTool(ctx, spd) }},
+		{name: "html_tool", new: func() (tool.InvokableTool, error) { return tools.NewHTMLTool(ctx, spd) }},
 	}
 
 	tools := make([]tool.BaseTool, 0, len(constructors))
@@ -174,13 +184,55 @@ func (c *SpiderAgent) Run(ctx context.Context, input *adk.AgentInput, options ..
 	return c.Agent.Run(ctx, input, options...)
 }
 
-func (c *SpiderAgent) OutputMessage(ctx context.Context, input string, streamFunc func(string), options ...adk.AgentRunOption) {
+// OutputMessage 执行一轮对话：把流式输出写到 streamFunc，
+// 并在启用了持久化记忆时，将本轮消息按会话 sessionID 追加保存，
+// 同时把历史消息作为上下文重新注入本轮。
+func (c *SpiderAgent) OutputMessage(ctx context.Context, sessionID, input string, streamFunc func(string), options ...adk.AgentRunOption) error {
+	var sess *fs.Session[*schema.Message]
+	var history []*schema.Message
+	if c.memory != nil {
+		s, err := c.memory.GetOrCreate(sessionID)
+		if err != nil {
+			return fmt.Errorf("get session %q: %w", sessionID, err)
+		}
+		sess = s
+		history = s.GetMessages()
+	}
+
+	// 历史 + 本轮用户消息，作为完整输入提交给 agent
+	msgs := make([]*schema.Message, 0, len(history)+1)
+	msgs = append(msgs, history...)
+	msgs = append(msgs, schema.UserMessage(input))
+
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: c.Agent, EnableStreaming: true})
-	iter := runner.Query(ctx, input, options...)
-	stream(iter, streamFunc)
+	iter := runner.Run(ctx, msgs, options...)
+
+	produced, err := stream(iter, streamFunc)
+	if err != nil {
+		return err
+	}
+
+	if sess != nil {
+		if err := sess.Append(schema.UserMessage(input)); err != nil {
+			return err
+		}
+		for _, m := range produced {
+			// 只持久化输入/回答/工具调用/工具结果，不保存思考过程。
+			if m.Role == schema.Assistant {
+				m.ReasoningContent = ""
+			}
+			if err := sess.Append(m); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
-func stream(iter *adk.AsyncIterator[*adk.AgentEvent], streamFunc func(string)) {
+// stream 消费 agent 事件流，把文本输出交给 streamFunc，
+// 并收集本轮产生的完整消息（含助手消息、工具调用与工具结果），用于持久化。
+func stream(iter *adk.AsyncIterator[*adk.AgentEvent], streamFunc func(string)) ([]*schema.Message, error) {
+	var produced []*schema.Message
 	for {
 		event, ok := iter.Next()
 		if !ok {
@@ -189,29 +241,42 @@ func stream(iter *adk.AsyncIterator[*adk.AgentEvent], streamFunc func(string)) {
 
 		if event.Err != nil {
 			log.Printf("Runner 错误: %v", event.Err)
-			break
+			return produced, event.Err
 		}
 
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			mo := event.Output.MessageOutput
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+		mo := event.Output.MessageOutput
 
-			// 【关键修复 1】：检查 MessageStream 是否为 nil
-			if mo.MessageStream == nil {
-				continue // 跳过 nil stream
+		// 流式消息：边输出文本边累积 chunk，结束后拼接为完整消息
+		if mo.MessageStream != nil {
+			msg, err := streamMessage(mo.MessageStream, streamFunc)
+			if err != nil {
+				return produced, err
 			}
+			if msg != nil {
+				produced = append(produced, msg)
+			}
+			continue
+		}
 
-			// 只有 Stream 不为 nil 时，才进入流式处理
-			streamMessage(mo.MessageStream, streamFunc)
+		// 非流式消息（通常是工具结果）：直接使用完整消息
+		if mo.Message != nil {
+			produced = append(produced, mo.Message)
 		}
 	}
+	return produced, nil
 }
 
-func streamMessage(s adk.MessageStream, streamFunc func(string)) {
+func streamMessage(s adk.MessageStream, streamFunc func(string)) (*schema.Message, error) {
 	// 【关键修复 2】：防御性判空，防止外部意外传入 nil 导致 panic
 	if s == nil {
-		return
+		return nil, nil
 	}
 	defer s.Close()
+
+	chunks := make([]*schema.Message, 0, 8)
 
 	// 工具调用信息缓存：在流式模式下，工具调用参数会跨多个 chunk 到达，需要累积
 	accToolCalls := make(map[int]*schema.ToolCall)
@@ -223,8 +288,10 @@ func streamMessage(s adk.MessageStream, streamFunc func(string)) {
 				break
 			}
 			log.Printf("Stream Recv 错误: %v", err)
-			break
+			return nil, err
 		}
+
+		chunks = append(chunks, chunk)
 
 		// 处理思考过程 (如果开启了 DeepSeek-R1 等支持 Reasoning 的模型)
 		if chunk.ReasoningContent != "" {
@@ -248,6 +315,11 @@ func streamMessage(s adk.MessageStream, streamFunc func(string)) {
 
 	// 流结束时刷新残留的工具调用
 	flushToolCalls(accToolCalls, streamFunc)
+
+	if len(chunks) == 0 {
+		return nil, nil
+	}
+	return schema.ConcatMessages(chunks)
 }
 
 // accumulateToolCalls 将流式 chunk 中的工具调用信息累积到 acc 中

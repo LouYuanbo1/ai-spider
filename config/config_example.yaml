@@ -1,5 +1,5 @@
 rod:
-  user_data_dir: user_data_dir
+  user_data_dir: user_data/browser
   user_mode: true
   headless: false
   incognito: false

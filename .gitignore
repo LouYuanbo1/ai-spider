@@ -33,7 +33,7 @@ go.work.sum
 # .vscode/
 
 #UserData
-user_data_dir
+user_data/
 
 #Config
 config/config.yaml
