@@ -13,6 +13,7 @@
 - 📄 **结构化取数**：`html_tool` 三种模式——默认 `accessibility` 基于可访问性树输出紧凑 Markdown（天然剔除隐藏/装饰/脚本节点、还原标题/列表/表格并附可交互 node_id，最省 token 且对 LLM 友好），`structured` 保留富文本内联格式，`full` 返回完整原始 HTML（保留精确结构与属性——需要 CSS/XPath 定位时使用）。
 - 💬 **终端多轮对话**：交互式命令行输入指令，逐轮调用智能体并流式输出思考与结果。
 - 🔍 **流式补齐与容错**：完整处理流式工具调用参数累积；工具失败不再中断，而是回传模型让其反思重试。
+- 🧠 **持久化会话记忆（mnemo）**：基于 eino ADK 的会话存储，将多轮对话历史以 JSONL 持久化到本地（`user_data/sessions`），并在每轮自动回填作为上下文，支持跨轮次连续记忆；输入 `n`/`new` 可切换到全新会话。
 
 ## 项目结构
 
@@ -28,9 +29,13 @@ ai-spider/
 │   ├── config_example.yaml # 配置模板（占位符，可安全提交）
 │   └── load.go             # 读取并解析 YAML 配置
 ├── agent/
-│   ├── agent.go            # 智能体构建：角色指令、11 个工具的注册表与流式输出处理
+│   ├── agent.go            # 智能体构建：角色指令、11 个工具的注册表、流式输出处理与会话记忆注入
 │   ├── tools.go            # 每个浏览器工具的封装（含调试日志包装 debugTool）
-│   └── agent_test.go       # 智能体/工具缺省等单元测试
+│   ├── agent_test.go       # 智能体/工具缺省等单元测试
+│   └── mnemo/              # 会话持久化记忆层（mnemo）
+│       └── fs/             # 基于文件系统（JSONL）的会话存储
+│           ├── store.go    # Store：会话的创建/加载/列举/删除，JSONL 读写
+│           └── session.go  # Session：单会话内存态（消息/标题/标题索引/续跑槽位）
 ├── spider/
 │   ├── spider.go           # 结构体定义 + InitSpider（启动/连接 Chrome） + Close + Navigate
 │   ├── click.go            # 三种点击：DoClick / DoClickX / DoClickNode + clickElement
@@ -47,23 +52,26 @@ ai-spider/
 │   ├── spider_test.go      # 正文截断、Action 序列化、Interactives/Summary JSON 等单元测试
 │   ├── spider_integration_test.go # 真实浏览器端到端集成测试（导航/取数/输入/滚动/JS 等）
 │   └── option_test.go      # Launcher 选项函数单元测试
-└── user_data_dir/          # 浏览器用户数据（Cookies/登录态等，已被 .gitignore 忽略）
+└── user_data/              # 本地数据根目录（已被 .gitignore 忽略）
+    ├── sessions/           # 会话历史（JSONL，由 mnemo/fs 管理）
+    └── browser/            # 浏览器用户数据（Cookies/登录态等）
 ```
 
 ## 模块详解
 
-本项目的代码按职责划分为四个模块，自顶向下为 `main` → `config` → `agent` → `spider`。
+本项目的代码按职责划分为四个模块，自顶向下为 `main` → `config` → `agent` → `spider`（其中 `agent` 层内嵌了会话记忆子模块 `mnemo`）。
 
 ### main（程序入口）
 
-[main.go](main.go) 负责整条链路的装配与交互循环，依次完成四件事：
+[main.go](main.go) 负责整条链路的装配与交互循环，依次完成五件事：
 
 1. 调用 `config.Load("config/config.yaml")` 读取配置，失败即终止。
 2. 基于配置的 `api_key` 通过 [eino-ext](https://github.com/cloudwego/eino-ext) 创建 DeepSeek 聊天模型（`model: deepseek-flash`）。
 3. 调用 `spider.InitSpider` 启动真实 Chrome 浏览器。
-4. 调用 `agent.NewDefaultSpiderAgent` 组装智能体，随后进入**终端多轮对话循环**：每轮读取用户输入，通过 `modelAgent.OutputMessage` 流式执行并打印结果，输入 `exit` / `quit` / `q` 或 `Ctrl+D` / `Ctrl+Z` 退出。
+4. 调用 `agent.NewDefaultSpiderAgent` 组装智能体。
+5. 通过 `fs.NewStore[*schema.Message]` 在 `user_data/sessions` 下创建会话存储，并调用 `modelAgent.SetMemoryStore` 开启持久化记忆，随后进入**终端多轮对话循环**：每轮读取用户输入，通过 `modelAgent.OutputMessage`（按会话 id 回填历史）流式执行并打印结果，输入 `n`/`new` 新建会话，输入 `exit` / `quit` / `q` 或 `Ctrl+D` / `Ctrl+Z` 退出。
 
-> 说明：当前会话是**无记忆**的，每一轮指令都会作为新请求独立执行。
+> 说明：会话是**持久化且有记忆**的。每轮对话会按会话 id（时间前缀+随机后缀）写入 `user_data/sessions/*.jsonl`，下一轮自动把历史消息作为上下文重新注入；输入 `n`/`new` 会生成一个新会话 id，从而开始一个上下文全新的对话。
 
 ### config（配置加载）
 
@@ -93,8 +101,15 @@ ai-spider/
 
 基于 eino ADK 构建 LLM 智能体，是「意图 → 操作」的决策中枢：
 
-- [agent.go](agent/agent.go)：`NewDefaultSpiderAgent` 内嵌一大段**系统指令**（角色定义、11 个工具的使用准则、工作流、行为边界、输出格式与错误处理策略），并注册全部工具；同时实现流式输出处理 `stream` / `streamMessage`，负责累积跨 chunk 到达的工具调用参数，并处理模型思考过程。
+- [agent.go](agent/agent.go)：`NewDefaultSpiderAgent` 内嵌一大段**系统指令**（角色定义、11 个工具的使用准则、工作流、行为边界、输出格式与错误处理策略），并注册全部工具；`OutputMessage` 在启用记忆时按会话 id 获取/创建 `Session`、回填历史消息，并在本轮结束后把生成的用户消息/助手回答/工具调用与结果追加持久化（剔除思考过程 `ReasoningContent`）；同时实现流式输出处理 `stream` / `streamMessage`，负责累积跨 chunk 到达的工具调用参数，并处理模型思考过程。
 - [tools.go](agent/tools.go)：逐一定义每个工具的实现与 `utils.InferTool` 装配，并通过 `debugTool` 统一包装——在终端打印参数与返回值，且**将工具错误转为普通文本回传模型**，让模型反思后重试而不是中断整次运行。
+
+### mnemo（会话持久化记忆）
+
+mnemo 是建立在 eino ADK `MessageType` 之上的**会话记忆层**，负责把多轮对话历史持久化到磁盘并在后续轮次自动恢复：
+
+- [fs/session.go](agent/mnemo/fs/session.go)：`Session[M]` 表示单次会话的内存态，按会话保存消息切片，并提供 `Append`（追加并持久化到 JSONL）、`GetMessages`（快照取回全部消息）、`Title`（由首个用户消息派生出会话标题，超 60 字符截断，用于会话列表展示）、`Set/GetPendingInterruptID` 与 `Set/GetMsgIdx`（供中断续跑使用的槽位/续跑标记）；`UserText` 从用户消息中抽取纯文本（兼容 `schema.Message` 与 `schema.AgenticMessage`）。
+- [fs/store.go](agent/mnemo/fs/store.go)：`Store[M]` 统一管理会话，`NewStore` 在指定目录下创建（目录不存在则自动创建）；`GetOrCreate(id)` 按会话 id 缓存并懒加载，不存在则新建成 JSONL 文件（首行写入含 `message_kind` 的 header，后续每行一条消息）；`List` 遍历目录返回所有会话元信息（id/标题/创建时间）；`Delete` 删除文件并清缓存；`KindOf`/`ValidateKind` 根据 `message_kind`（`message`/`agentic`）校验文件与当前运行类型是否匹配，逐行容错跳过损坏记录。
 
 ## 第三方依赖提醒
 
@@ -148,15 +163,17 @@ copy config\config_example.yaml config\config.yaml
 go run .
 ```
 
-程序会在终端提示输入指令，输入 `exit` / `quit` / `q` 或按下 `Ctrl+D` / `Ctrl+Z` 退出。
+程序会在终端提示输入指令，输入 `n` / `new` 新建对话（切换全新会话上下文），输入 `exit` / `quit` / `q` 或按下 `Ctrl+D` / `Ctrl+Z` 退出。
 
 ### 4. 交互示例
 
 ```
->>> 请输入指令 (输入 exit/quit/q 退出): 打开 https://example.com 并抓取正文
+>>> 请输入指令 (输入 n/new 新建对话, exit/quit/q 退出): 打开 https://example.com 并抓取正文
 ```
 
 智能体会自动完成：导航 → 等待加载 → 提取正文 → 按格式输出（页面信息、抓取内容、操作摘要等）。
+
+> 在同一会话内连续输入多条指令时，智能体会记住之前的上下文并据此继续操作；想要开始一段全新的、无历史的任务时，输入 `n`/`new` 即可。
 
 ## 配置说明
 
@@ -166,7 +183,7 @@ go run .
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `user_data_dir` | `user_data_dir` | 浏览器用户数据目录（`user_mode:false` 时作为干净隔离档案目录使用） |
+| `user_data_dir` | `user_data/browser` | 浏览器用户数据目录（`user_mode:false` 时作为干净隔离档案目录使用） |
 | `user_mode` | `true` | 复用本机真实浏览器档案（登录态/Cookies）|
 | `headless` | `false` | 是否无头模式运行 |
 | `disable_blink_features` | 缺省即留空 | 缺省（不写）时不向 Chrome 传该 flag，隐藏 webdriver 交由 stealth 运行时处理 |
@@ -249,7 +266,8 @@ go test ./...
 本项目对敏感信息做了以下保护，请勿移除相关 `.gitignore` 规则：
 
 - **API Key**：真实密钥仅存放在 `config/config.yaml`（`model.api_key`），该文件已被 `.gitignore` 忽略；仓库中的 `config_example.yaml` 使用占位符 `your_api_key`，可安全提交。
-- **浏览器登录态**：`user_data_dir/` 目录包含 Cookies、登录数据等浏览器隐私，已被 `.gitignore` 忽略，不会随源码提交。
+- **浏览器登录态**：`user_data/browser/` 目录包含 Cookies、登录数据等浏览器隐私，已被 `.gitignore` 忽略，不会随源码提交。
+- **会话历史**：`user_data/sessions/` 目录（由 `mnemo` 写入的 JSONL 会话记忆）可能与对话中的网页内容一并保存在本地，已随整个 `user_data/` 目录一并被 `.gitignore` 忽略，不会提交到版本库；如需清除历史，删除该目录即可。
 - **环境变量**：`.env` 已在忽略规则中。
 - ⚠️ **注意**：切勿将真实 `config.yaml` 重命名为可被跟踪的文件名，或将 API Key 硬编码进源码后提交。
 
