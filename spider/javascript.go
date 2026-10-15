@@ -21,7 +21,7 @@ func (s *Spider) DoJavaScript(ctx context.Context, js string, args ...any) (stri
 	}
 
 	run := func() (*proto.RuntimeRemoteObject, error) {
-		return s.page.Eval(source, args...)
+		return s.page.Context(ctx).Eval(source, args...)
 	}
 
 	result, err := run()
@@ -29,7 +29,11 @@ func (s *Spider) DoJavaScript(ctx context.Context, js string, args ...any) (stri
 		// 模型生成的 JS 在 SPA 页面（如 B 站）上偶发失败，
 		// 重试一次，避免一次偶发异常就中断整次抓取。
 		s.logger.Warn("JS执行失败，重试中", "js", js, "err", err)
-		time.Sleep(300 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(300 * time.Millisecond):
+		}
 		result, err = run()
 		if err != nil {
 			s.logger.Error("JS执行失败", "js", js, "err", err)

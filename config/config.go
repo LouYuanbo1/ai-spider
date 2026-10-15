@@ -1,5 +1,11 @@
 package config
 
+type SpiderConfig struct {
+	Humanize       bool `yaml:"humanize"`
+	ToolTimeoutSec int  `yaml:"tool_timeout"`
+	RodConfig
+}
+
 type RodConfig struct {
 	UserDataDir          string `yaml:"user_data_dir"`
 	UserMode             bool   `yaml:"user_mode"`
@@ -27,6 +33,8 @@ type RodConfig struct {
 	Trace bool `yaml:"trace"`
 	//(真人化行为：逐字打字/点击悬停/分段滚动) 默认 true
 	Humanize bool `yaml:"humanize"`
+	//每次工具调用允许的最大执行时长（秒）；超时后视为该次调用失败并交由 LLM 重试，默认 15
+	ToolTimeoutSec int `yaml:"tool_timeout"`
 }
 
 type ModelConfig struct {

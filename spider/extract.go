@@ -1,6 +1,7 @@
 package spider
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -14,8 +15,8 @@ import (
 )
 
 // GetHTML 返回当前页面的完整原始 HTML。
-func (s *Spider) GetHTML() (string, error) {
-	return s.page.HTML()
+func (s *Spider) GetHTML(ctx context.Context) (string, error) {
+	return s.page.Context(ctx).HTML()
 }
 
 // nonContentTags 是从结果中整体剔除的"无正文内容/技术噪音"标签。
@@ -206,8 +207,9 @@ func prune(n *html.Node) bool {
 // 先对整页做内容级剪枝（去 Chrome/空壳，见 prune），再用 html-to-markdown(v2) 转换为
 // Markdown（表格/任务列表/删除线用 GFM 扩展）。相比原始 HTML 更省 token、对 LLM 更友好，
 // 同时保留标题、列表、表格、链接等结构。
-func (s *Spider) GetStructured() (string, error) {
-	raw, err := s.page.HTML()
+func (s *Spider) GetStructured(ctx context.Context) (string, error) {
+	p := s.page.Context(ctx)
+	raw, err := p.HTML()
 	if err != nil {
 		return "", err
 	}
@@ -224,7 +226,7 @@ func (s *Spider) GetStructured() (string, error) {
 
 	// domain 用于把相对链接（/path、./x）转成绝对链接。
 	domain := ""
-	if info, err := s.page.Info(); err == nil {
+	if info, err := p.Info(); err == nil {
 		domain = info.URL
 	}
 
@@ -551,19 +553,20 @@ func subtreeHasStructural(tn *axTreeNode) bool {
 //   - table/grid 还原为 Markdown 表格（表头/分隔线）；
 //   - 保留 node_id（即 BackendDOMNodeID，与 get_interactives 的 node_id 同源），
 //     使 LLM 拿到内容后可直接用 click_by_node_id / input_by_node_id 交互。
-func (s *Spider) GetAXContent() (string, error) {
-	err := proto.AccessibilityEnable{}.Call(s.page)
+func (s *Spider) GetAXContent(ctx context.Context) (string, error) {
+	p := s.page.Context(ctx)
+	err := proto.AccessibilityEnable{}.Call(p)
 	if err != nil {
 		return "", err
 	}
-	result, err := proto.AccessibilityGetFullAXTree{}.Call(s.page)
+	result, err := proto.AccessibilityGetFullAXTree{}.Call(p)
 	if err != nil {
 		return "", err
 	}
 
 	forest := buildAXTree(result.Nodes)
 	return renderAXContent(forest, func(id proto.DOMBackendNodeID) string {
-		return s.resolveHref(id)
+		return s.resolveHref(p, id)
 	}), nil
 }
 

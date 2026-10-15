@@ -45,7 +45,7 @@ ai-spider/
 │   ├── interact.go         # GetInteractives 采集可交互元素 + Link/Button/Input 结构体
 │   ├── extract.go          # 内容提取：GetHTML / GetStructured / AX 内容 GetAXContent
 │   ├── summary.go          # 动作回执 ActionSummary + PageFingerprint + truncateText
-│   ├── humanize.go         # "真人化"行为层：逐字打字、点击悬停、分段滚动（由 rod.humanize 控制）
+│   ├── humanize.go         # "真人化"行为层：逐字打字、点击悬停、分段滚动（由 spider.humanize 控制）
 │   ├── action.go           # 密封接口 Action 与各动作参数结构体
 │   ├── option.go           # Launcher 选项函数（链式配置 Chrome 启动参数）
 │   ├── extract_test.go     # 内容剪枝（prune/isLinkWall/isHiddenElement）与 AX 树渲染还原等单元测试
@@ -93,7 +93,7 @@ ai-spider/
 - [interact.go](spider/interact.go)：`GetInteractives` 通过可访问性树采集链接/按钮/输入框（含 `node_id`），并定义 `Link` / `Button` / `Input` / `Interactives` 结构体。
 - [extract.go](spider/extract.go)：内容提取——`GetHTML` 返回完整原始 HTML；`GetStructured` 对整页做内容级剪枝（`prune`）后用 html-to-markdown(v2) 转为可读 Markdown；`GetAXContent` 基于浏览器可访问性树(AX)输出紧凑 Markdown（还原标题/列表/表格与层级，并内联可交互 `node_id`）。
 - [summary.go](spider/summary.go)：轻量动作回执 `ActionSummary`（`effective` 表示操作是否真正生效）与 `PageFingerprint` 页面变化判断、`truncateText` 截断工具。
-- [humanize.go](spider/humanize.go)：`"真人化"`行为辅助层。开启时（`rod.humanize: true`）将输入改为逐字打字（字符间随机停顿并偶发打错退格）、点击前置悬停并随机停留、滚动改为分段式并穿插随机"阅读"停顿，降低被识别为机器人的概率；关闭时回退为一次性输入、瞬时点击与瞬时滚动。开关保存在 `Spider.humanize` 字段，由 `InitSpider` 从配置注入，每个实例相互独立。
+- [humanize.go](spider/humanize.go)：`"真人化"`行为辅助层。开启时（`spider.humanize: true`）将输入改为逐字打字（字符间随机停顿并偶发打错退格）、点击前置悬停并随机停留、滚动改为分段式并穿插随机"阅读"停顿，降低被识别为机器人的概率；关闭时回退为一次性输入、瞬时点击与瞬时滚动。开关保存在 `Spider.humanize` 字段，由 `InitSpider` 从配置注入，每个实例相互独立。
 - [action.go](spider/action.go)：通过 `isAction()` 私有方法实现 Go 的**密封接口**技巧，定义 `Navigate` / `ClickBy*` / `InputBy*` / `Scroll` / `JavaScript` / `HTML` 等动作参数结构体。
 - [option.go](spider/option.go)：`LauncherOption` 函数式选项，将配置映射为 Chrome 启动旗标（如 `WithUserDataDir`、`WithHeadless`、`WithRemoteDebuggingPort`），供 `InitSpider` 链式拼接。
 
@@ -127,7 +127,7 @@ mnemo 是建立在 eino ADK `MessageType` 之上的**会话记忆层**，负责�
 ## 环境要求
 
 - Go 1.27 或更高版本
-- 已安装的 Chrome 浏览器（默认路径 `C:/Program Files/Google/Chrome/Application/chrome.exe`，可通过 `rod.bin` 配置修改）
+- 已安装的 Chrome 浏览器（默认路径 `C:/Program Files/Google/Chrome/Application/chrome.exe`，可通过 `spider.bin` 配置修改）
 - 一个可用的 LLM API Key（本项目使用 DeepSeek flash 模型）
 
 ## 快速开始
@@ -141,7 +141,22 @@ go mod download
 
 ### 2. 配置
 
-将配置模板复制为本地配置文件并填入真实值：
+👉 **推荐方式：通过环境变量注入 API Key**（避免密钥进入磁盘文件，也杜绝误提交风险）
+
+```bash
+# Linux / macOS
+export AI_SPIDER_API_KEY="sk-你的key"
+
+# Windows PowerShell（当前终端有效）
+$env:AI_SPIDER_API_KEY = "sk-你的key"
+
+# Windows（永久生效，需重开终端）
+[Environment]::SetEnvironmentVariable("AI_SPIDER_API_KEY","sk-你的key","User")
+```
+
+程序启动时会优先读取环境变量 `AI_SPIDER_API_KEY`，仅当它为空时才回退到 `config.yaml` 中 `model.api_key` 的值。
+
+若你仍需使用配置文件，将模板复制为本地配置文件并填入真实值：
 
 ```bash
 # Windows
@@ -152,10 +167,10 @@ copy config\config_example.yaml config\config.yaml
 
 | 配置项 | 说明 |
 |--------|------|
-| `model.api_key` | 你的 LLM API Key（必填） |
-| `rod.bin` | Chrome 可执行文件路径（按需） |
+| `model.api_key` | 你的 LLM API Key（当环境变量未设置时作为兜底，必填） |
+| `spider.bin` | Chrome 可执行文件路径（按需） |
 
-> ⚠️ **安全提醒**：`config/config.yaml` 包含 API Key 与浏览器登录态，**不要提交到版本库**。项目已在 `.gitignore` 中忽略它（详见下方「安全说明」）。
+> ⚠️ **安全提醒**：若把 API Key 写入 `config/config.yaml`，该文件包含密钥与浏览器登录态，**不要提交到版本库**。项目已在 `.gitignore` 中忽略它（详见下方「安全说明」）。只要设置了 `AI_SPIDER_API_KEY` 环境变量，可以安全地在 `config.yaml` 中留空 `api_key`。
 
 ### 3. 运行
 
@@ -177,9 +192,9 @@ go run .
 
 ## 配置说明
 
-`config/config.yaml` 采用 YAML 格式，分为 `rod`（浏览器）与 `model`（模型）两部分。
+`config/config.yaml` 采用 YAML 格式，分为 `spider`（浏览器）与 `model`（模型）两部分。
 
-### rod（浏览器启动配置）
+### spider（浏览器启动配置）
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
@@ -206,9 +221,11 @@ go run .
 
 | 配置项 | 说明 |
 |--------|------|
-| `api_key` | 调用 LLM 的 API Key |
+| `api_key` | 调用 LLM 的 API Key（仅作**兜底**；优先使用环境变量 `AI_SPIDER_API_KEY`，见下） |
 
 模型在代码中固定为 `deepseek-flash`。
+
+> **API Key 读取优先级**：程序启动时先读取环境变量 `AI_SPIDER_API_KEY`，非空则覆盖 `config.yaml` 中的 `api_key`；环境变量为空时才会使用 yaml 中的值。因此强烈建议用环境变量注入密钥，避免写入配置文件带来的泄露风险。
 
 ## 智能体工具
 
@@ -265,7 +282,8 @@ go test ./...
 
 本项目对敏感信息做了以下保护，请勿移除相关 `.gitignore` 规则：
 
-- **API Key**：真实密钥仅存放在 `config/config.yaml`（`model.api_key`），该文件已被 `.gitignore` 忽略；仓库中的 `config_example.yaml` 使用占位符 `your_api_key`，可安全提交。
+- ✅ **推荐：API Key 通过环境变量注入**。设置 `AI_SPIDER_API_KEY` 即优先生效，密钥不落磁盘、不进版本库，最安全。用法见「快速开始 → 配置」。
+- **API Key（配置文件方案）**：若将真实密钥写入 `config/config.yaml`（`model.api_key`），该文件已被 `.gitignore` 忽略，不会随源码提交；仓库中的 `config_example.yaml` 使用占位符 `your_api_key`，可安全提交。
 - **浏览器登录态**：`user_data/browser/` 目录包含 Cookies、登录数据等浏览器隐私，已被 `.gitignore` 忽略，不会随源码提交。
 - **会话历史**：`user_data/sessions/` 目录（由 `mnemo` 写入的 JSONL 会话记忆）可能与对话中的网页内容一并保存在本地，已随整个 `user_data/` 目录一并被 `.gitignore` 忽略，不会提交到版本库；如需清除历史，删除该目录即可。
 - **环境变量**：`.env` 已在忽略规则中。

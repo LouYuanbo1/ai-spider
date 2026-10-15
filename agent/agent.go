@@ -37,7 +37,7 @@ func NewSpiderAgent(ctx context.Context, agent *adk.ChatModelAgent) (*SpiderAgen
 
 func NewDefaultSpiderAgent(ctx context.Context, model model.ToolCallingChatModel, spd *spider.Spider) (*SpiderAgent, error) {
 
-	tools, err := newSpiderTools(ctx, spd)
+	tools, err := newSpiderTools(spd)
 	if err != nil {
 		return nil, err
 	}
@@ -151,22 +151,22 @@ func NewDefaultSpiderAgent(ctx context.Context, model model.ToolCallingChatModel
 // newSpiderTools 集中注册 Spider 智能体所需的所有浏览器自动化工具。
 // 这里用一张注册表描述“工具名 → 创建函数”，统一依次创建并聚合到工具列表，
 // 避免在 NewDefaultSpiderAgent 中堆叠十余段重复的错误处理代码。
-func newSpiderTools(ctx context.Context, spd *spider.Spider) ([]tool.BaseTool, error) {
+func newSpiderTools(spd *spider.Spider) ([]tool.BaseTool, error) {
 	constructors := []struct {
 		name string
 		new  func() (tool.InvokableTool, error)
 	}{
-		{name: "navigate_tool", new: func() (tool.InvokableTool, error) { return tools.NewNavigateTool(ctx, spd) }},
-		{name: "get_interactives_tool", new: func() (tool.InvokableTool, error) { return tools.NewGetInteractivesTool(ctx, spd) }},
-		{name: "click_by_css_tool", new: func() (tool.InvokableTool, error) { return tools.NewClickByCSSTool(ctx, spd) }},
-		{name: "click_by_xpath_tool", new: func() (tool.InvokableTool, error) { return tools.NewClickByXPathTool(ctx, spd) }},
-		{name: "click_by_node_id_tool", new: func() (tool.InvokableTool, error) { return tools.NewClickByNodeIDTool(ctx, spd) }},
-		{name: "input_by_css_tool", new: func() (tool.InvokableTool, error) { return tools.NewInputByCSSTool(ctx, spd) }},
-		{name: "input_by_xpath_tool", new: func() (tool.InvokableTool, error) { return tools.NewInputByXPathTool(ctx, spd) }},
-		{name: "input_by_node_id_tool", new: func() (tool.InvokableTool, error) { return tools.NewInputByNodeIDTool(ctx, spd) }},
-		{name: "scroll_tool", new: func() (tool.InvokableTool, error) { return tools.NewScrollTool(ctx, spd) }},
-		{name: "javascript_tool", new: func() (tool.InvokableTool, error) { return tools.NewJavaScriptTool(ctx, spd) }},
-		{name: "html_tool", new: func() (tool.InvokableTool, error) { return tools.NewHTMLTool(ctx, spd) }},
+		{name: "navigate_tool", new: func() (tool.InvokableTool, error) { return tools.NewNavigateTool(spd) }},
+		{name: "get_interactives_tool", new: func() (tool.InvokableTool, error) { return tools.NewGetInteractivesTool(spd) }},
+		{name: "click_by_css_tool", new: func() (tool.InvokableTool, error) { return tools.NewClickByCSSTool(spd) }},
+		{name: "click_by_xpath_tool", new: func() (tool.InvokableTool, error) { return tools.NewClickByXPathTool(spd) }},
+		{name: "click_by_node_id_tool", new: func() (tool.InvokableTool, error) { return tools.NewClickByNodeIDTool(spd) }},
+		{name: "input_by_css_tool", new: func() (tool.InvokableTool, error) { return tools.NewInputByCSSTool(spd) }},
+		{name: "input_by_xpath_tool", new: func() (tool.InvokableTool, error) { return tools.NewInputByXPathTool(spd) }},
+		{name: "input_by_node_id_tool", new: func() (tool.InvokableTool, error) { return tools.NewInputByNodeIDTool(spd) }},
+		{name: "scroll_tool", new: func() (tool.InvokableTool, error) { return tools.NewScrollTool(spd) }},
+		{name: "javascript_tool", new: func() (tool.InvokableTool, error) { return tools.NewJavaScriptTool(spd) }},
+		{name: "html_tool", new: func() (tool.InvokableTool, error) { return tools.NewHTMLTool(spd) }},
 	}
 
 	tools := make([]tool.BaseTool, 0, len(constructors))
@@ -208,25 +208,20 @@ func (c *SpiderAgent) OutputMessage(ctx context.Context, sessionID, input string
 	iter := runner.Run(ctx, msgs, options...)
 
 	produced, err := stream(iter, streamFunc)
-	if err != nil {
-		return err
-	}
 
+	// 无论 stream 是否出错，只要已有会话且产生了内容，都应尽量持久化，
+	// 避免一次消息错误就导致整段对话丢失。
 	if sess != nil {
-		if err := sess.Append(schema.UserMessage(input)); err != nil {
-			return err
-		}
+		sess.Append(schema.UserMessage(input))
 		for _, m := range produced {
 			// 只持久化输入/回答/工具调用/工具结果，不保存思考过程。
 			if m.Role == schema.Assistant {
 				m.ReasoningContent = ""
 			}
-			if err := sess.Append(m); err != nil {
-				return err
-			}
+			sess.Append(m)
 		}
 	}
-	return nil
+	return err
 }
 
 // stream 消费 agent 事件流，把文本输出交给 streamFunc，

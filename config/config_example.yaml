@@ -1,4 +1,4 @@
-rod:
+spider:
   user_data_dir: user_data/browser
   user_mode: true
   headless: false
@@ -16,5 +16,6 @@ rod:
   basic_remote_debugging_port: 9222
   trace: false
   humanize: true
+  tool_timeout: 60
 model:
   api_key: your_api_key

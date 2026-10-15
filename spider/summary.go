@@ -1,8 +1,11 @@
 package spider
 
 import (
+	"context"
 	"encoding/json/v2"
 	"strings"
+
+	"github.com/go-rod/rod"
 )
 
 // ActionSummary 动作执行后的轻量确认结果，避免每次操作都向 LLM 返回全文。
@@ -20,8 +23,9 @@ type ActionSummary struct {
 }
 
 // ActionSummary 组装动作确认结果，snippet 为正文文本截断片段
-func (s *Spider) ActionSummary(action, status string, effective bool) (string, error) {
-	info, _ := s.page.Info()
+func (s *Spider) ActionSummary(ctx context.Context, action, status string, effective bool) (string, error) {
+	p := s.page.Context(ctx)
+	info, _ := p.Info()
 	title, url := "", ""
 	if info != nil {
 		title, url = info.Title, info.URL
@@ -32,7 +36,7 @@ func (s *Spider) ActionSummary(action, status string, effective bool) (string, e
 		Title:     title,
 		URL:       url,
 		Effective: effective,
-		Snippet:   s.bodySnippet(200),
+		Snippet:   s.bodySnippet(p, 200),
 	}
 	data, err := json.Marshal(summary)
 	if err != nil {
@@ -42,8 +46,8 @@ func (s *Spider) ActionSummary(action, status string, effective bool) (string, e
 }
 
 // bodySnippet 截取页面正文文本片段，用作轻量摘要
-func (s *Spider) bodySnippet(maxLen int) string {
-	el, err := s.page.Element("body")
+func (s *Spider) bodySnippet(p *rod.Page, maxLen int) string {
+	el, err := p.Element("body")
 	if err != nil {
 		return ""
 	}
@@ -56,9 +60,10 @@ func (s *Spider) bodySnippet(maxLen int) string {
 }
 
 // PageFingerprint 计算页面轻量指纹(URL+标题+正文前段)，用于判断动作前后内容是否变化
-func (s *Spider) PageFingerprint() string {
-	txt := s.bodySnippet(2000)
-	info, _ := s.page.Info()
+func (s *Spider) PageFingerprint(ctx context.Context) string {
+	p := s.page.Context(ctx)
+	txt := s.bodySnippet(p, 2000)
+	info, _ := p.Info()
 	if info == nil {
 		return txt
 	}

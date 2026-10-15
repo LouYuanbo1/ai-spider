@@ -1,9 +1,11 @@
 package spider
 
 import (
+	"context"
 	"encoding/json/v2"
 	"strings"
 
+	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 )
 
@@ -36,13 +38,14 @@ type Interactives struct {
 }
 
 // GetInteractives 遍历可访问性树，采集链接、按钮与文本输入框
-func (s *Spider) GetInteractives() (string, error) {
-	err := proto.AccessibilityEnable{}.Call(s.page)
+func (s *Spider) GetInteractives(ctx context.Context) (string, error) {
+	p := s.page.Context(ctx)
+	err := proto.AccessibilityEnable{}.Call(p)
 	if err != nil {
 		return "", err
 	}
 
-	result, err := proto.AccessibilityGetFullAXTree{}.Call(s.page)
+	result, err := proto.AccessibilityGetFullAXTree{}.Call(p)
 	if err != nil {
 		return "", err
 	}
@@ -58,7 +61,7 @@ func (s *Spider) GetInteractives() (string, error) {
 		case "link":
 			interactives.Links = append(interactives.Links, Link{
 				Name:   node.Name.Value.String(),
-				Href:   s.resolveHref(node.BackendDOMNodeID),
+				Href:   s.resolveHref(p, node.BackendDOMNodeID),
 				NodeID: int64(node.BackendDOMNodeID),
 			})
 		case "button":
@@ -92,8 +95,8 @@ func (s *Spider) GetInteractives() (string, error) {
 }
 
 // resolveHref 通过 DOM 节点读取 href 属性，并补全协议相对地址
-func (s *Spider) resolveHref(backendNodeID proto.DOMBackendNodeID) string {
-	href, err := s.attrOfNode(backendNodeID, "href")
+func (s *Spider) resolveHref(p *rod.Page, backendNodeID proto.DOMBackendNodeID) string {
+	href, err := s.attrOfNode(p, backendNodeID, "href")
 	if err != nil {
 		return ""
 	}
@@ -105,8 +108,8 @@ func (s *Spider) resolveHref(backendNodeID proto.DOMBackendNodeID) string {
 }
 
 // attrOfNode 从 DOM 节点中按属性名取值。Attributes 是扁平数组: [名称1, 值1, 名称2, 值2, ...]
-func (s *Spider) attrOfNode(backendNodeID proto.DOMBackendNodeID, want string) (string, error) {
-	res, err := proto.DOMDescribeNode{BackendNodeID: backendNodeID}.Call(s.page)
+func (s *Spider) attrOfNode(p *rod.Page, backendNodeID proto.DOMBackendNodeID, want string) (string, error) {
+	res, err := proto.DOMDescribeNode{BackendNodeID: backendNodeID}.Call(p)
 	if err != nil || res.Node == nil {
 		return "", err
 	}
