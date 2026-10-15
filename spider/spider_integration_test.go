@@ -56,7 +56,7 @@ func newFixtureServer() *httptest.Server {
 // 若环境无法拉起浏览器（未安装/路径不可用）则跳过，避免 CI 上误报失败。
 func requireBrowserSpider(t *testing.T) *Spider {
 	t.Helper()
-	cfg := &config.RodConfig{
+	cfg := &config.SpiderConfig{
 		Headless:    true,        // 无头运行，更快且不干扰桌面
 		Incognito:   true,        // 无痕，避免污染默认档案
 		NoSandbox:   true,        //
@@ -88,25 +88,26 @@ func TestSpiderCoreIntegration(t *testing.T) {
 	srv := newFixtureServer()
 	t.Cleanup(srv.Close)
 	base := srv.URL
+	ctx := context.Background()
 
 	t.Run("Navigate 到达页面并读取有效信息", func(t *testing.T) {
-		require.NoError(t, s.Navigate(base))
+		require.NoError(t, s.Navigate(ctx, base))
 		info, err := s.page.Info()
 		require.NoError(t, err)
 		assert.Equal(t, "入口页", info.Title, "应导航到入口页并得到正确标题")
 	})
 
 	t.Run("GetHTML 返回包含页面标记的完整 HTML", func(t *testing.T) {
-		require.NoError(t, s.Navigate(base))
-		html, err := s.GetHTML()
+		require.NoError(t, s.Navigate(ctx, base))
+		html, err := s.GetHTML(ctx)
 		require.NoError(t, err)
 		assert.Contains(t, html, "<title>入口页</title>")
 		assert.Contains(t, html, `id="go"`)
 	})
 
 	t.Run("GetInteractives 采集链接/按钮/输入框", func(t *testing.T) {
-		require.NoError(t, s.Navigate(base))
-		out, err := s.GetInteractives()
+		require.NoError(t, s.Navigate(ctx, base))
+		out, err := s.GetInteractives(ctx)
 		require.NoError(t, err)
 		assert.Contains(t, out, `"跳转页链接"`)
 		assert.Contains(t, out, `"更新结果"`)
@@ -114,8 +115,8 @@ func TestSpiderCoreIntegration(t *testing.T) {
 	})
 
 	t.Run("DoInput 注入文本并判定为已生效", func(t *testing.T) {
-		require.NoError(t, s.Navigate(base))
-		ok, err := s.DoInput("#kw", "Go 爬虫测试", false)
+		require.NoError(t, s.Navigate(ctx, base))
+		ok, err := s.DoInput(ctx, "#kw", "Go 爬虫测试", false)
 		require.NoError(t, err)
 		assert.True(t, ok, "输入目标文本后应判定为已生效")
 		got, err := s.elementValue(mustElement(t, s.page, "#kw"))
@@ -124,41 +125,41 @@ func TestSpiderCoreIntegration(t *testing.T) {
 	})
 
 	t.Run("DoJavaScript 执行 JS 并取回返回值", func(t *testing.T) {
-		require.NoError(t, s.Navigate(base))
-		val, err := s.DoJavaScript(context.Background(), "return document.title")
+		require.NoError(t, s.Navigate(ctx, base))
+		val, err := s.DoJavaScript(ctx, "return document.title")
 		require.NoError(t, err)
 		assert.Contains(t, val, "入口页", "JS 应取回页面标题")
 	})
 
 	t.Run("DoClick 触发脚本更新 #result", func(t *testing.T) {
-		require.NoError(t, s.Navigate(base))
-		require.NoError(t, s.DoClick("#go"))
+		require.NoError(t, s.Navigate(ctx, base))
+		require.NoError(t, s.DoClick(ctx, "#go"))
 		txt, err := mustElement(t, s.page, "#result").Text()
 		require.NoError(t, err)
 		assert.Equal(t, "按钮已点击", txt, "点击按钮后 #result 应被脚本更新")
 	})
 
 	t.Run("DoClickNode 通过 node_id 再次点击", func(t *testing.T) {
-		require.NoError(t, s.Navigate(base))
-		out, err := s.GetInteractives()
+		require.NoError(t, s.Navigate(ctx, base))
+		out, err := s.GetInteractives(ctx)
 		require.NoError(t, err)
 		// 从采集结果中解析出按钮 node_id，走 node_id 精准点击路径
 		var its Interactives
 		require.NoError(t, json.Unmarshal([]byte(out), &its), "采集结果应能反序列化")
 		require.NotEmpty(t, its.Buttons, "页面应采集到按钮")
 		nodeID := proto.DOMBackendNodeID(its.Buttons[0].NodeID)
-		require.NoError(t, s.DoClickNode(nodeID), "DoClickNode 应能按 node_id 点击")
+		require.NoError(t, s.DoClickNode(ctx, nodeID), "DoClickNode 应能按 node_id 点击")
 		txt, err := mustElement(t, s.page, "#result").Text()
 		require.NoError(t, err)
 		assert.Equal(t, "按钮已点击", txt, "node_id 点击后 #result 应更新")
 	})
 
 	t.Run("DoScroll 正常返回", func(t *testing.T) {
-		require.NoError(t, s.DoScroll(300))
+		require.NoError(t, s.DoScroll(ctx, 300))
 	})
 
 	t.Run("ActionSummary 返回有效回执与摘要", func(t *testing.T) {
-		out, err := s.ActionSummary("navigate", "ok", true)
+		out, err := s.ActionSummary(ctx, "navigate", "ok", true)
 		require.NoError(t, err)
 		assert.Contains(t, out, `"action":"navigate"`)
 		assert.Contains(t, out, `"effective":true`)
@@ -166,21 +167,21 @@ func TestSpiderCoreIntegration(t *testing.T) {
 	})
 
 	t.Run("PageFingerprint 稳定且随输入变化", func(t *testing.T) {
-		require.NoError(t, s.Navigate(base))
-		a := s.PageFingerprint()
-		b := s.PageFingerprint()
+		require.NoError(t, s.Navigate(ctx, base))
+		a := s.PageFingerprint(ctx)
+		b := s.PageFingerprint(ctx)
 		assert.NotEmpty(t, a, "指纹不应为空")
 		assert.Equal(t, a, b, "页面未变时前后两次指纹应一致")
 
 		// input 的 value 不会体现在 innerText 中，因此用点击按钮触发可读文本
 		// 更新（#result: 初始结果 -> 按钮已点击），更贴近真实用户行为。
-		require.NoError(t, s.DoClick("#go"))
-		assert.NotEqual(t, a, s.PageFingerprint(), "内容变化后指纹应不同")
+		require.NoError(t, s.DoClick(ctx, "#go"))
+		assert.NotEqual(t, a, s.PageFingerprint(ctx), "内容变化后指纹应不同")
 	})
 
 	t.Run("链接点击后跳转到第二页", func(t *testing.T) {
-		require.NoError(t, s.Navigate(base))
-		require.NoError(t, s.DoClick("#nav"))
+		require.NoError(t, s.Navigate(ctx, base))
+		require.NoError(t, s.DoClick(ctx, "#nav"))
 		// 锚点点击触发的导航是异步的，立刻读 Info 可能还停留在上一文档，
 		// 轮询等待标题真正变为第二页，避免偶发竞态。
 		require.Eventually(t, func() bool {

@@ -1,6 +1,7 @@
 package spider
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -56,8 +57,9 @@ func (s *Spider) doInput(el *rod.Element, text string, clearFlag bool) (bool, er
 }
 
 // DoInput CSS选择器定位输入框输入文本；返回是否真正写入成功
-func (s *Spider) DoInput(selector, text string, clearFlag bool) (bool, error) {
-	el, err := s.page.Element(selector)
+func (s *Spider) DoInput(ctx context.Context, selector, text string, clearFlag bool) (bool, error) {
+	p := s.page.Context(ctx)
+	el, err := p.Element(selector)
 	if err != nil {
 		return false, fmt.Errorf("未找到输入框 %q: %v", selector, err)
 	}
@@ -65,8 +67,9 @@ func (s *Spider) DoInput(selector, text string, clearFlag bool) (bool, error) {
 }
 
 // DoInputX XPath定位输入框输入文本；返回是否真正写入成功
-func (s *Spider) DoInputX(selector, text string, clearFlag bool) (bool, error) {
-	el, err := s.page.ElementX(selector)
+func (s *Spider) DoInputX(ctx context.Context, selector, text string, clearFlag bool) (bool, error) {
+	p := s.page.Context(ctx)
+	el, err := p.ElementX(selector)
 	if err != nil {
 		return false, fmt.Errorf("未找到XPath输入框 %q: %v", selector, err)
 	}
@@ -74,8 +77,9 @@ func (s *Spider) DoInputX(selector, text string, clearFlag bool) (bool, error) {
 }
 
 // DoInputNode 通过后端 DOM 节点 ID 精准定位输入框并输入文本；返回是否真正写入成功
-func (s *Spider) DoInputNode(backendNodeID proto.DOMBackendNodeID, text string, clearFlag bool) (bool, error) {
-	el, err := s.page.ElementFromNode(&proto.DOMNode{BackendNodeID: backendNodeID})
+func (s *Spider) DoInputNode(ctx context.Context, backendNodeID proto.DOMBackendNodeID, text string, clearFlag bool) (bool, error) {
+	p := s.page.Context(ctx)
+	el, err := p.ElementFromNode(&proto.DOMNode{BackendNodeID: backendNodeID})
 	if err != nil {
 		return false, fmt.Errorf("解析节点 %d 失败: %v", backendNodeID, err)
 	}

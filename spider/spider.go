@@ -1,6 +1,7 @@
 package spider
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,13 +14,24 @@ import (
 )
 
 type Spider struct {
-	browser  *rod.Browser
-	page     *rod.Page
-	logger   *slog.Logger
-	humanize bool
+	browser     *rod.Browser
+	page        *rod.Page
+	logger      *slog.Logger
+	humanize    bool
+	toolTimeout time.Duration
 }
 
-func InitSpider(cfg *config.RodConfig) (*Spider, error) {
+// ToolTimeout 返回每次工具调用允许的最大执行时长。
+// 由 config.yaml 的 rod.tool_timeout 配置（秒）；未配置或非法时为 0，
+// 这里兜底为 15 秒。
+func (s *Spider) ToolTimeout() time.Duration {
+	if s.toolTimeout <= 0 {
+		return 30 * time.Second
+	}
+	return s.toolTimeout
+}
+
+func InitSpider(cfg *config.SpiderConfig) (*Spider, error) {
 	logger := slog.Default().With("component", "spider")
 
 	// Chrome 136+ 要求远程调试必须搭配非默认的 --user-data-dir，
@@ -64,10 +76,11 @@ func InitSpider(cfg *config.RodConfig) (*Spider, error) {
 	page := stealth.MustPage(browser)
 
 	return &Spider{
-		browser:  browser,
-		page:     page,
-		logger:   logger,
-		humanize: cfg.Humanize,
+		browser:     browser,
+		page:        page,
+		logger:      logger,
+		humanize:    cfg.Humanize,
+		toolTimeout: time.Duration(cfg.ToolTimeoutSec) * time.Second,
 	}, nil
 }
 
@@ -87,17 +100,18 @@ func (s *Spider) ClosePage() error {
 	return nil
 }
 
-// Navigate 导航到目标URL并等待页面加载与网络空闲
-func (s *Spider) Navigate(url string) error {
-	if err := s.page.Navigate(url); err != nil {
+// Navigate 导航到目标URL并等待页面加载与网络空闲。
+// 使用 ctx 超时/取消来控制整个导航过程的等待，避免卡死在慢资源或无响应的页面上。
+func (s *Spider) Navigate(ctx context.Context, url string) error {
+	p := s.page.Context(ctx)
+	if err := p.Navigate(url); err != nil {
 		return fmt.Errorf("导航失败: %v", err)
 	}
-	if err := s.page.WaitLoad(); err != nil {
+	if err := p.WaitLoad(); err != nil {
 		if strings.Contains(err.Error(), "navigated or closed") {
 			return nil
 		}
 		return fmt.Errorf("页面加载等待失败: %v", err)
 	}
-	s.page.WaitRequestIdle(500*time.Millisecond, nil, nil, nil)
 	return nil
 }
